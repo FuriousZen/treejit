@@ -29,6 +29,9 @@ from .tree import contexts, node_id
 from .util import decay, now
 
 MAX_INSTANCES = 40  # most recent passing instances used for bindings/guards
+NE_COLS = ("node", "edge", "family", "n", "pass_runs", "fail_runs", "pass_n", "blamed", "tomb", "live", "replayable",
+           "tier", "purity", "success", "conf", "bindings", "holes", "guard", "post", "ref", "reasons", "commit_point",
+           "savings", "latency_ms", "score", "fillable", "blocked")
 
 
 @dataclass
@@ -242,6 +245,8 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
         fillable = live and not tomb and safe and (not commit or (approved and pass_runs >= cfg.promote_runs + 1))
         replayable = fillable and not holes
         tier = "tomb" if tomb else "hot" if replayable else "live" if live else "warm" if pass_runs else "cold"
+        blocked = ("" if replayable else "tomb" if tomb else "not_live" if not live else "holes" if holes
+                   else "needs_approval" if not safe or (commit and not approved) else "commit_point_needs_evidence")
         costs = [usage[rd.steps[i].call.id] for rd, i in lst if not rd.replayed[i] and rd.steps[i].call.id in usage]
         savings = sum(c[0] for c in costs) / len(costs) if costs else 0.0
         latency = sum(c[1] for c in costs) / len(costs) if costs else 0.0
@@ -255,7 +260,7 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
             nid, eid, family, len(lst), pass_runs, fail_runs, pass_n, round(f, 4), int(tomb), int(live), int(replayable),
             tier, round(purity, 4), round(success, 4), round(purity * success, 4), dumps(bindings), dumps(holes),
             dumps(guard), dumps(post), dumps(ref), dumps(reasons[:3]), int(commit), round(savings, 1), round(latency, 1),
-            round(pass_runs * max(savings, 1.0) * templatability, 2), int(fillable),
+            round(pass_runs * max(savings, 1.0) * templatability, 2), int(fillable), blocked,
         ))
 
     # 5. decision lists
@@ -288,7 +293,7 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
             db.execute(f"DELETE FROM {table} WHERE family=?", (family,))
         db.executemany("INSERT INTO edges VALUES(?,?,?,?,?,?,?)", edge_rows)
         db.executemany("INSERT INTO nodes VALUES(?,?,?,?,?,?,?,?,?,?,?)", node_rows)
-        db.executemany(f"INSERT INTO node_edges VALUES({','.join('?' * 26)})", ne_rows)
+        db.executemany(f"INSERT INTO node_edges({','.join(NE_COLS)}) VALUES({','.join('?' * len(NE_COLS))})", ne_rows)
         db.execute("UPDATE families SET built_at=?, dirty=0 WHERE id=?", (t_now, family))
     return {"family": family, "runs": len(runs), "edges": len(edge_rows), "nodes": len(node_rows),
             "hot": sum(1 for r in ne_rows if r[11] == "hot"), "tomb": sum(1 for r in ne_rows if r[11] == "tomb")}

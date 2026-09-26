@@ -1,4 +1,4 @@
-"""treejit CLI: serve, show, runs, outcome, pin, approve, prune, export, build, stats."""
+"""treejit CLI: serve, show, runs, outcome, pin, approve, pending, explain, prune, export, build, stats."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import sys
 
 from .config import Config
 from .engine import TreeJIT
+from .operate import IdError, resolve_id
 from .util import now, short
 
 
@@ -15,7 +16,17 @@ def _jit(args: argparse.Namespace) -> TreeJIT:
     cfg = Config.load(args.config)
     if args.db:
         cfg.db = args.db
-    return TreeJIT(config=cfg)
+    jit = TreeJIT(config=cfg)
+    if getattr(args, "family", None):
+        args.family = _resolve(jit, "family", args.family)
+    return jit
+
+
+def _resolve(jit: TreeJIT, kind: str, text: str) -> str:
+    try:
+        return resolve_id(jit.store, kind, text)
+    except IdError as e:
+        raise SystemExit(f"treejit: {e}")
 
 
 def cmd_serve(a: argparse.Namespace) -> None:
@@ -52,22 +63,62 @@ def cmd_outcome(a: argparse.Namespace) -> None:
 
 def cmd_pin(a: argparse.Namespace) -> None:
     jit = _jit(a)
+    a.node = _resolve(jit, "node", a.node)
+    a.edge = _resolve(jit, "edge", a.edge) if a.edge else ""
     if a.unpin:
-        jit.store.x("DELETE FROM pins WHERE node=? AND edge=?", (a.node, a.edge or ""))
+        jit.store.x("DELETE FROM pins WHERE node=? AND edge=?", (a.node, a.edge))
     else:
-        jit.store.x("INSERT OR REPLACE INTO pins(node, edge, ts) VALUES(?,?,?)", (a.node, a.edge or "", now()))
+        jit.store.x("INSERT OR REPLACE INTO pins(node, edge, ts) VALUES(?,?,?)", (a.node, a.edge, now()))
     _mark_dirty(jit)
     print("unpinned" if a.unpin else "pinned", a.node, a.edge or "(whole node)")
 
 
 def cmd_approve(a: argparse.Namespace) -> None:
+    from . import operate
+
     jit = _jit(a)
+    if a.review:
+        jit.rebuild_dirty()
+        if operate.review(jit.store, jit.cfg, a.family, sys.stdin, sys.stdout):
+            _mark_dirty(jit)
+        return
+    if not a.edge:
+        raise SystemExit("treejit: approve needs an edge id (or '*', or --review)")
+    if a.edge != "*":
+        a.edge = _resolve(jit, "edge", a.edge)
+    if a.node:
+        a.node = _resolve(jit, "node", a.node)
     if a.revoke:
         jit.store.x("DELETE FROM approvals WHERE edge=? AND node=?", (a.edge, a.node or ""))
     else:
         jit.store.x("INSERT OR REPLACE INTO approvals(edge, node, ts) VALUES(?,?,?)", (a.edge, a.node or "", now()))
     _mark_dirty(jit)
     print("revoked" if a.revoke else "approved", a.edge, "at", a.node or "every node")
+
+
+def cmd_revoke(a: argparse.Namespace) -> None:
+    a.revoke, a.review = True, False
+    cmd_approve(a)
+
+
+def cmd_pending(a: argparse.Namespace) -> None:
+    from . import operate
+
+    jit = _jit(a)
+    jit.rebuild_dirty()
+    items = operate.pending(jit.store, jit.cfg, a.family)
+    print(json.dumps(items, indent=2) if a.json else operate.pending_text(items))
+
+
+def cmd_explain(a: argparse.Namespace) -> None:
+    from . import operate
+
+    jit = _jit(a)
+    run_id = operate.latest_run(jit.store) if a.run_id == "latest" else _resolve(jit, "run", a.run_id)
+    if run_id is None:
+        raise SystemExit("treejit: no runs recorded yet")
+    d = operate.explain(jit.store, run_id)
+    print(json.dumps(d, indent=2) if a.json else operate.explain_text(d))
 
 
 def cmd_prune(a: argparse.Namespace) -> None:
@@ -127,7 +178,8 @@ def cmd_stats(a: argparse.Namespace) -> None:
     jit = _jit(a)
     s = jit.stats(a.family)
     total = sum(v["tool_calls"] for v in s.values()) or 1
-    replayed = sum(v["tool_calls"] for k, v in s.items() if k in ("T0", "T1", "T2", "T3"))
+    # every tier but the model (T4) and pass-through requests is served by treejit (T0, T1, T2, T3)
+    replayed = sum(v["tool_calls"] for k, v in s.items() if k not in ("T4", "pass"))
     small = sum(v["requests"] for k, v in s.items() if k in ("T2", "T3"))
     print(json.dumps(s, indent=2))
     print(f"tool calls served by replay: {replayed}/{total} ({100 * replayed / total:.1f}%)")
@@ -148,7 +200,7 @@ def main(argv: list[str] | None = None) -> None:
 
     s = sub.add_parser("show", help="print the tree")
     s.add_argument("--family")
-    s.add_argument("--ids", action="store_true", help="show node/edge ids (for pin/approve)")
+    s.add_argument("--ids", action="store_true", help="show short node/edge ids (for pin/approve)")
     s.add_argument("--depth", type=int, default=40)
     s.add_argument("--no-macros", action="store_true")
     s.set_defaults(fn=cmd_show)
@@ -170,10 +222,27 @@ def main(argv: list[str] | None = None) -> None:
     s.set_defaults(fn=cmd_pin)
 
     s = sub.add_parser("approve", help="allow replay to cross a non-read-only edge / commit point")
-    s.add_argument("edge")
+    s.add_argument("edge", nargs="?", help="edge id or unique prefix (>= 4 chars), or '*' for every edge")
     s.add_argument("--node", help="only at this node (default: everywhere)")
     s.add_argument("--revoke", action="store_true")
+    s.add_argument("--review", action="store_true", help="walk pending edges interactively (y/e/n/s/q on stdin)")
+    s.add_argument("--family", help="with --review: only this family")
     s.set_defaults(fn=cmd_approve)
+
+    s = sub.add_parser("revoke", help="undo an approval (same as approve --revoke)")
+    s.add_argument("edge")
+    s.add_argument("--node")
+    s.set_defaults(fn=cmd_revoke)
+
+    s = sub.add_parser("pending", help="list promoted edges waiting on operator approval")
+    s.add_argument("--family")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_pending)
+
+    s = sub.add_parser("explain", help="per-step timeline of one run: who decided each step and why")
+    s.add_argument("run_id", help="run id, unique prefix, or 'latest'")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_explain)
 
     s = sub.add_parser("prune", help="evict cold nodes")
     s.add_argument("--days", type=float)
