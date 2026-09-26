@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "treejit"
+version = "0.1.0"
+description = "Inference proxy with memory: learns a persistent execution tree from successful agent runs and replays proven tool-call sequences with zero model calls."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []  # the core is stdlib-only
+
+[project.optional-dependencies]
+proxy = ["uvicorn>=0.23", "httpx>=0.25"]
+dev = ["pytest>=7", "uvicorn>=0.23", "httpx>=0.25"]
+
+[project.scripts]
+treejit = "treejit.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "bench/src"]

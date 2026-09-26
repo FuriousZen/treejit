@@ -1,0 +1,98 @@
+{
+  "baseline": {
+    "first": {
+      "range": "1-10",
+      "n": 10,
+      "calls_per_task": 6.1,
+      "tokens_per_task": 5372.2,
+      "served_pct": 0.0,
+      "success_pct": 100.0,
+      "wall_s_per_task": 10.138830000000002,
+      "side_exits": 0
+    },
+    "mid": {
+      "range": "41-50",
+      "n": 10,
+      "calls_per_task": 6.4,
+      "tokens_per_task": 5767.5,
+      "served_pct": 0.0,
+      "success_pct": 100.0,
+      "wall_s_per_task": 10.626269999999998,
+      "side_exits": 0
+    },
+    "last": {
+      "range": "151-200",
+      "n": 50,
+      "calls_per_task": 6.3,
+      "tokens_per_task": 5440.1,
+      "served_pct": 0.0,
+      "success_pct": 94.0,
+      "wall_s_per_task": 10.391954000000002,
+      "side_exits": 0
+    }
+  },
+  "treejit": {
+    "first": {
+      "range": "1-10",
+      "n": 10,
+      "calls_per_task": 5.0,
+      "tokens_per_task": 4533.7,
+      "served_pct": 21.568627450980394,
+      "success_pct": 100.0,
+      "wall_s_per_task": 8.291529999999998,
+      "side_exits": 0
+    },
+    "mid": {
+      "range": "41-50",
+      "n": 10,
+      "calls_per_task": 4.2,
+      "tokens_per_task": 4117.3,
+      "served_pct": 40.74074074074074,
+      "success_pct": 100.0,
+      "wall_s_per_task": 6.96427,
+      "side_exits": 0
+    },
+    "last": {
+      "range": "151-200",
+      "n": 50,
+      "calls_per_task": 4.28,
+      "tokens_per_task": 4164.18,
+      "served_pct": 41.843971631205676,
+      "success_pct": 100.0,
+      "wall_s_per_task": 7.036486,
+      "side_exits": 0
+    }
+  },
+  "treejit+ok": {
+    "first": {
+      "range": "1-10",
+      "n": 10,
+      "calls_per_task": 4.5,
+      "tokens_per_task": 4061.1,
+      "served_pct": 31.372549019607842,
+      "success_pct": 100.0,
+      "wall_s_per_task": 7.42594,
+      "side_exits": 0
+    },
+    "mid": {
+      "range": "41-50",
+      "n": 10,
+      "calls_per_task": 1.4,
+      "tokens_per_task": 1549.3,
+      "served_pct": 92.5925925925926,
+      "success_pct": 100.0,
+      "wall_s_per_task": 2.03259,
+      "side_exits": 0
+    },
+    "last": {
+      "range": "151-200",
+      "n": 50,
+      "calls_per_task": 1.28,
+      "tokens_per_task": 1372.76,
+      "served_pct": 94.94584837545126,
+      "success_pct": 100.0,
+      "wall_s_per_task": 1.8783039999999993,
+      "side_exits": 0
+    }
+  }
+}
