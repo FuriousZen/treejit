@@ -19,6 +19,7 @@ Families
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import re
@@ -412,6 +413,60 @@ def make_retail_task(rng: random.Random, i: int) -> tuple[str, RetailEnv]:
 # ============================================================================ simulated model
 
 
+# Virtual harness payloads (E2): extra system-prompt + tool-schema tokens a real harness sends on every
+# full call. The sim's own system prompt and tools are ~450 tokens; tau-bench's wiki + 16 tool schemas are
+# ~5k; Claude Code sends ~24k (12k system + 12k tools). T2/T3 subcalls are built by treejit and never carry it.
+PAYLOAD_TOKENS = {"none": 0, "tau": 5000, "claude-code": 24000}
+
+
+class UsageModel:
+    """Token usage of a full (T4) call: prompt chars / 4 + the virtual harness payload.
+
+    With `cache`, an Anthropic-style prompt cache is modelled. Breakpoints sit after the static prefix
+    (payload + tools), after the system prompt, and at the last message of every request (automatic
+    caching). A request reads the longest earlier-written prefix at those boundaries and writes the rest,
+    so usage reports `cache_read_input_tokens` / `cache_creation_input_tokens` and `input_tokens` = 0,
+    as the API does with a breakpoint on the last block. Totals equal the uncached `input_tokens`.
+    TTL, the minimum cacheable length and the 20-block lookback are ignored.
+    """
+
+    def __init__(self, payload: str = "none", cache: bool = False) -> None:
+        if payload not in PAYLOAD_TOKENS:
+            raise ValueError(f"payload must be one of {sorted(PAYLOAD_TOKENS)}")
+        self.payload = PAYLOAD_TOKENS[payload]
+        self.payload_name = payload
+        self.cache = cache
+        self.written: set[str] = set()
+
+    def full(self, body: dict, out_tokens: int) -> dict:
+        system = body.get("system", "")
+        system = system if isinstance(system, str) else json.dumps(system)
+        tools = json.dumps(body.get("tools", []))
+        msgs = body.get("messages", [])
+        total = self.payload + (len(system) + len(tools) + len(json.dumps(msgs))) // 4
+        if not self.cache:
+            return {"input_tokens": total, "output_tokens": out_tokens}
+        hs = hashlib.sha256(f"{self.payload_name}\0{tools}".encode())
+        keys = [(hs.hexdigest(), self.payload + len(tools) // 4)]
+        hs.update(b"\0" + system.encode())
+        chars = len(tools) + len(system)
+        keys.append((hs.hexdigest(), self.payload + chars // 4))
+        for m in msgs:
+            js = json.dumps(m)
+            hs.update(b"\0" + js.encode())
+            chars += len(js) + 2
+            keys.append((hs.hexdigest(), self.payload + chars // 4))
+        read = 0
+        for k, tok in keys:
+            if k in self.written:
+                read = tok
+        read = min(read, total)
+        for i in (0, 1, len(keys) - 1):
+            self.written.add(keys[i][0])
+        return {"input_tokens": 0, "cache_read_input_tokens": read, "cache_creation_input_tokens": total - read,
+                "output_tokens": out_tokens}
+
+
 def _history(messages: list[dict]) -> list[tuple[str, dict, str, bool]]:
     calls: dict[str, tuple[str, dict]] = {}
     order: list[str] = []
@@ -440,12 +495,13 @@ def _hints(messages: list[dict]) -> str:
 class SimModel:
     """Anthropic-Messages-shaped fake model. `__call__(body) -> response dict`."""
 
-    def __init__(self, seed: int = 0, noise: float = 0.06) -> None:
+    def __init__(self, seed: int = 0, noise: float = 0.06, payload: str = "none", cache: bool = False) -> None:
         self.rng = random.Random(seed)
         self.noise = noise
         self.calls = 0           # full calls
         self.small_calls = 0     # treejit T2/T3 subcalls (forced treejit_* tool)
         self.small_tokens = [0, 0]
+        self.usage = UsageModel(payload, cache)
 
     def __call__(self, body: dict) -> dict:
         forced = (body.get("tool_choice") or {}).get("name", "")
@@ -468,11 +524,10 @@ class SimModel:
             name, args = action
             content = [{"type": "tool_use", "id": f"toolu_{self.rng.randrange(16 ** 20):020x}", "name": name, "input": args}]
             stop = "tool_use"
-        prompt_chars = len(body.get("system", "")) + len(json.dumps(body.get("tools", []))) + len(json.dumps(msgs))
         out_tokens = len(json.dumps(content)) // 4 + 40  # + hidden reasoning
         return {"id": f"msg_{self.rng.randrange(16 ** 12):012x}", "type": "message", "role": "assistant",
                 "model": body.get("model", "sim"), "content": content, "stop_reason": stop, "stop_sequence": None,
-                "usage": {"input_tokens": prompt_chars // 4, "output_tokens": out_tokens}}
+                "usage": self.usage.full(body, out_tokens)}
 
     # ---------------------------------------------------------------- treejit subcalls
     def _subcall(self, body: dict, tool: str) -> dict:
