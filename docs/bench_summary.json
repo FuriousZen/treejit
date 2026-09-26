@@ -3,105 +3,152 @@
     "first": {
       "range": "1-10",
       "n": 10,
-      "calls_per_task": 6.1,
+      "calls_per_task": 5.7,
       "small_calls_per_task": 0.0,
-      "tokens_per_task": 5372.2,
+      "tokens_per_task": 5582.7,
       "served_pct": 0.0,
-      "success_pct": 100.0,
-      "wall_s_per_task": 10.13883,
-      "side_exits": 0
+      "success_pct": 90.0,
+      "wall_s_per_task": 9.38734,
+      "side_exits": 0,
+      "compacted_chars_per_task": 0.0
     },
     "mid": {
       "range": "41-50",
       "n": 10,
-      "calls_per_task": 6.4,
+      "calls_per_task": 6.8,
       "small_calls_per_task": 0.0,
-      "tokens_per_task": 5767.5,
+      "tokens_per_task": 7396.2,
       "served_pct": 0.0,
-      "success_pct": 100.0,
-      "wall_s_per_task": 10.62629,
-      "side_exits": 0
+      "success_pct": 90.0,
+      "wall_s_per_task": 11.22484,
+      "side_exits": 0,
+      "compacted_chars_per_task": 0.0
     },
     "last": {
       "range": "151-200",
       "n": 50,
-      "calls_per_task": 6.3,
+      "calls_per_task": 6.02,
       "small_calls_per_task": 0.0,
-      "tokens_per_task": 5440.1,
+      "tokens_per_task": 6196.18,
       "served_pct": 0.0,
-      "success_pct": 94.0,
-      "wall_s_per_task": 10.391984000000003,
-      "side_exits": 0
+      "success_pct": 96.0,
+      "wall_s_per_task": 9.959202000000003,
+      "side_exits": 0,
+      "compacted_chars_per_task": 0.0
     }
   },
   "treejit": {
     "first": {
       "range": "1-10",
       "n": 10,
-      "calls_per_task": 4.9,
-      "small_calls_per_task": 0.2,
-      "tokens_per_task": 4494.2,
-      "served_pct": 23.529411764705884,
+      "calls_per_task": 4.2,
+      "small_calls_per_task": 0.1,
+      "tokens_per_task": 4685.7,
+      "served_pct": 34.69387755102041,
       "success_pct": 100.0,
-      "wall_s_per_task": 8.35963,
-      "side_exits": 0
+      "wall_s_per_task": 7.00958,
+      "side_exits": 1,
+      "compacted_chars_per_task": 0.0
     },
     "mid": {
       "range": "41-50",
       "n": 10,
-      "calls_per_task": 4.0,
+      "calls_per_task": 4.9,
       "small_calls_per_task": 0.0,
-      "tokens_per_task": 4001.2,
-      "served_pct": 44.44444444444444,
+      "tokens_per_task": 6564.9,
+      "served_pct": 37.096774193548384,
       "success_pct": 100.0,
-      "wall_s_per_task": 6.62762,
-      "side_exits": 0
+      "wall_s_per_task": 8.07445,
+      "side_exits": 0,
+      "compacted_chars_per_task": 0.0
     },
     "last": {
       "range": "151-200",
       "n": 50,
-      "calls_per_task": 4.18,
-      "small_calls_per_task": 0.0,
-      "tokens_per_task": 4051.58,
-      "served_pct": 42.59927797833935,
+      "calls_per_task": 3.7,
+      "small_calls_per_task": 0.14,
+      "tokens_per_task": 4820.36,
+      "served_pct": 48.47328244274809,
       "success_pct": 100.0,
-      "wall_s_per_task": 6.878354,
-      "side_exits": 0
+      "wall_s_per_task": 6.253578,
+      "side_exits": 0,
+      "compacted_chars_per_task": 0.0
     }
   },
   "treejit+ok": {
     "first": {
       "range": "1-10",
       "n": 10,
-      "calls_per_task": 4.0,
-      "small_calls_per_task": 0.7,
-      "tokens_per_task": 3934.5,
-      "served_pct": 41.1764705882353,
+      "calls_per_task": 4.1,
+      "small_calls_per_task": 0.1,
+      "tokens_per_task": 4611.3,
+      "served_pct": 38.0,
       "success_pct": 100.0,
-      "wall_s_per_task": 7.4051100000000005,
-      "side_exits": 0
+      "wall_s_per_task": 6.83263,
+      "side_exits": 2,
+      "compacted_chars_per_task": 0.0
     },
     "mid": {
       "range": "41-50",
       "n": 10,
-      "calls_per_task": 1.0,
-      "small_calls_per_task": 0.4,
-      "tokens_per_task": 1359.6,
-      "served_pct": 100.0,
+      "calls_per_task": 1.1,
+      "small_calls_per_task": 0.8,
+      "tokens_per_task": 2168.8,
+      "served_pct": 98.38709677419355,
       "success_pct": 100.0,
-      "wall_s_per_task": 1.8364200000000002,
-      "side_exits": 0
+      "wall_s_per_task": 2.54004,
+      "side_exits": 0,
+      "compacted_chars_per_task": 0.0
     },
     "last": {
       "range": "151-200",
       "n": 50,
-      "calls_per_task": 1.0,
-      "small_calls_per_task": 0.2,
-      "tokens_per_task": 1224.38,
-      "served_pct": 100.0,
+      "calls_per_task": 1.06,
+      "small_calls_per_task": 0.9,
+      "tokens_per_task": 2037.66,
+      "served_pct": 98.85496183206106,
       "success_pct": 100.0,
-      "wall_s_per_task": 1.6360259999999998,
-      "side_exits": 0
+      "wall_s_per_task": 2.5802240000000003,
+      "side_exits": 0,
+      "compacted_chars_per_task": 0.0
+    }
+  },
+  "treejit+ok+compact": {
+    "first": {
+      "range": "1-10",
+      "n": 10,
+      "calls_per_task": 4.1,
+      "small_calls_per_task": 0.1,
+      "tokens_per_task": 4540.5,
+      "served_pct": 38.0,
+      "success_pct": 100.0,
+      "wall_s_per_task": 6.832940000000001,
+      "side_exits": 2,
+      "compacted_chars_per_task": 258.9
+    },
+    "mid": {
+      "range": "41-50",
+      "n": 10,
+      "calls_per_task": 1.1,
+      "small_calls_per_task": 0.8,
+      "tokens_per_task": 2104.8,
+      "served_pct": 98.38709677419355,
+      "success_pct": 100.0,
+      "wall_s_per_task": 2.5412699999999995,
+      "side_exits": 0,
+      "compacted_chars_per_task": 246.9
+    },
+    "last": {
+      "range": "151-200",
+      "n": 50,
+      "calls_per_task": 1.06,
+      "small_calls_per_task": 0.9,
+      "tokens_per_task": 1980.96,
+      "served_pct": 98.85496183206106,
+      "success_pct": 100.0,
+      "wall_s_per_task": 2.5804560000000003,
+      "side_exits": 0,
+      "compacted_chars_per_task": 218.0
     }
   }
 }

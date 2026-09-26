@@ -20,6 +20,9 @@ from .templates import call_slots, shape_of
 from .util import h
 
 
+END = "$end"  # pseudo-edge: the model ended the episode here (a final answer, no tool call). Never replayed.
+
+
 def node_id(family: str, kind: str, ctx: tuple) -> str:
     return h(family, kind, list(ctx), n=12)
 
@@ -94,7 +97,8 @@ class TreeView:
     by_shape: dict[str, str] = field(default_factory=dict)
     children: dict[str, list[NodeEdge]] = field(default_factory=dict)
     stumps: dict[str, dict] = field(default_factory=dict)
-    node_pass: dict[str, int] = field(default_factory=dict)
+    node_pass: dict[str, int] = field(default_factory=dict)   # model choices here, END included
+    node_end: dict[str, int] = field(default_factory=dict)    # ...of which the model ended the episode
 
     @classmethod
     def load(cls, store: Store, family: str) -> "TreeView":
@@ -105,8 +109,10 @@ class TreeView:
             v.by_shape[e.shape] = e.id
         for r in store.q("SELECT * FROM node_edges WHERE family=?", (family,)):
             v.children.setdefault(r["node"], []).append(NodeEdge.from_row(r))
-        for r in store.q("SELECT id, stump, n_pass FROM nodes WHERE family=?", (family,)):
+        for r in store.q("SELECT id, stump, n_pass, n_end FROM nodes WHERE family=?", (family,)):
             v.node_pass[r["id"]] = r["n_pass"] or 0
+            if r["n_end"]:
+                v.node_end[r["id"]] = r["n_end"]
             if r["stump"]:
                 v.stumps[r["id"]] = json.loads(r["stump"])
         return v

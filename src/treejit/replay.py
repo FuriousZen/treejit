@@ -27,7 +27,7 @@ from .features import eval_decision_list, guard_holds, obs_features, task_words
 from .model import NormRequest, ToolCall
 from .policy import is_commit_point, is_readonly
 from .templates import Val, call_slots, render
-from .tree import EdgeInfo, NodeEdge, TreeView, contexts, node_id
+from .tree import END, EdgeInfo, NodeEdge, TreeView, contexts, node_id
 
 MAX_OPTIONS = 6       # known children offered at a T2 call
 MAX_FILL = 8000       # longest value accepted for one hole
@@ -76,11 +76,31 @@ def _usable(ne: NodeEdge, holes_ok: bool) -> bool:
     return not ne.tomb and (ne.replayable or (holes_ok and ne.fillable))
 
 
+def rule_support(cfg: Config, rule: dict) -> float:
+    """Model-chosen examples a decision-list rule needs before T1 replays on it. Task words
+    generalize worst (a word shared by a few tasks of one kind is often chance), so they need
+    more than observation predicates; every failed run the rule replayed into multiplies it."""
+    base = cfg.task_rule_support if rule["pred"][0] == "task" else 2
+    return base * (1 + rule.get("neg", 0))
+
+
 def _choose(view: TreeView, cfg: Config, nid: str, kids: list[NodeEdge], feats: dict | None, text: str,
             words: set, pending: bool, holes_ok: bool = False) -> tuple[NodeEdge | None, str, float, str]:
-    """Returns (edge, tier, confidence, why-not)."""
-    best = max(kids, key=lambda ne: (ne.pass_n, ne.conf, ne.edge))
-    if best.purity >= cfg.purity:
+    """Returns (edge, tier, confidence, why-not). why-not "end": the model ends the episode here."""
+    n = view.node_pass.get(nid, 0)
+    n_end = view.node_end.get(nid, 0)
+    best = max(kids, key=lambda ne: (ne.pass_n, ne.conf, ne.edge)) if kids else None
+    if best is None or n_end > best.pass_n:
+        share = n_end / n if n else 0.0
+        if best is not None and best.pass_n > 0:
+            share *= n / (n + 1)
+        return None, "", 0.0, "end" if share >= cfg.purity else "ambiguous"
+    share = best.purity
+    if n_end or any(k.pass_n > 0 for k in kids if k is not best):
+        # the model has chosen differently here too: one pseudo-count for the other side, so
+        # 4 choices against 1 (80%) is not enough to replay blindly, 8 against 1 is
+        share *= n / (n + 1) if n else 0.0
+    if share >= cfg.purity:
         if best.tomb:
             return None, "", 0.0, "tombstoned"
         if not _usable(best, holes_ok):
@@ -94,10 +114,16 @@ def _choose(view: TreeView, cfg: Config, nid: str, kids: list[NodeEdge], feats: 
     if dl:
         leaf = eval_decision_list(dl, feats or {}, text, words)
         if leaf and leaf["purity"] >= cfg.purity and leaf["n"] >= 2:
+            if leaf["edge"] == END:
+                return None, "", 0.0, "end"
             ne = next((k for k in kids if k.edge == leaf["edge"]), None)
             if ne is not None and _usable(ne, holes_ok):
                 if feats is not None and ne.guard and not guard_holds(ne.guard, feats):
                     return None, "", 0.0, "guard"
+                if leaf.get("support", leaf["n"]) < rule_support(cfg, leaf):
+                    # not proven yet: ask (T2) instead of replaying; the model's pick is a
+                    # labelled example that confirms the rule or breaks it
+                    return None, "", 0.0, "unproven_rule"
                 return ne, "T1", leaf["purity"] * ne.success, ""
             return None, "", 0.0, "branch_not_replayable"
     return None, "", 0.0, "ambiguous"
@@ -215,15 +241,16 @@ def decide(view: TreeView, cfg: Config, req: NormRequest, dialect: Dialect) -> P
         starved: list[str] = []          # ...and those contexts
         for kind, ctx in ctxs:
             cand = node_id(view.family, kind, ctx)
-            here = view.children.get(cand)
-            if not here:
+            here = view.children.get(cand, [])
+            ended = view.node_end.get(cand, 0)
+            if not here and not ended:
                 continue
             if plan.node is None and first:
                 plan.node = cand
             if view.node_pass.get(cand, 0) < cfg.promote_runs:
                 # too little evidence here; a less specific context may know more,
                 # as long as what it proposes doesn't contradict what little we saw here
-                chosen = {k.edge for k in here if k.pass_n > 0}
+                chosen = {k.edge for k in here if k.pass_n > 0} | ({END} if ended else set())
                 if chosen:
                     seen_here.append(chosen)
                 starved.append(cand)
@@ -237,7 +264,7 @@ def decide(view: TreeView, cfg: Config, req: NormRequest, dialect: Dialect) -> P
                     choice = (ne, tier, conf)
             break
         if choice is None:
-            if (why == "ambiguous" and first and cfg.t2 and nid and count < cfg.hard_cap
+            if (why in ("ambiguous", "unproven_rule") and first and cfg.t2 and nid and count < cfg.hard_cap
                     and sum(1 for k in kids if k.pass_n > 0 and not k.tomb) >= 2):
                 opts = _alternatives(view, cfg, kids, feats, S)[:MAX_OPTIONS]
                 if sum(o.ne.purity for o in opts) >= MIN_COVER:

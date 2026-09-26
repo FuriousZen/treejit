@@ -145,16 +145,40 @@ def guard_of(feature_dicts: list[dict]) -> dict:
 # ---------------------------------------------------------------- decision lists
 
 
-def learn_decision_list(examples: list[tuple[str, dict, str, set]], purity: float, max_rules: int = 6) -> dict | None:
+def excess_negatives(neg: float, confirmed: float, purity: float) -> float:
+    """Failed replays beyond the failure rate tolerated among all replays of the same choice.
+
+    A failed run fails every replayed step in it, not just the one that went wrong, so a few
+    failures among many passing replays are noise elsewhere in the run; a failure rate above
+    1 - purity is evidence against the choice itself."""
+    return max(0.0, neg - (1.0 - purity) * (neg + confirmed))
+
+
+def learn_decision_list(examples: list[tuple[str, dict, str, set]], purity: float, max_rules: int = 6,
+                        negatives: list[tuple[str, dict, str, set]] | None = None,
+                        confirmed: list[tuple[str, dict, str, set]] | None = None) -> dict | None:
     """examples: (label, feats, obs_text, task_words). Returns a decision list or None.
 
     Greedily picks the predicate isolating the largest pure-enough subset of the
     remaining examples, preferring predicates that are also false on examples of
     other labels (low leak), removes it and repeats. There is no catch-all
     default: an input no rule fires on goes to the model.
+
+    negatives: inputs where replaying `label` here ended in a failed run; confirmed: the
+    same for passing runs. Replayed steps never become examples, so without negatives a
+    wrong rule could never be refuted: the inputs it misroutes stop producing evidence.
+    A rule predicting `label` counts the matching negatives in excess of the tolerated
+    failure rate (`excess_negatives`) as misses: lower purity, more leak, and a `neg`
+    field that raises the support it needs before T1 replays on it (replay.rule_support).
     """
     if len({e[0] for e in examples}) < 2 or len(examples) < 3:
         return None
+    negatives = negatives or []
+    confirmed = confirmed or []
+
+    def matching(pool: list, pred: list, label: str) -> int:
+        return sum(1 for e in pool if e[0] == label and eval_pred(pred, e[1], e[2], e[3]))
+
     rules = []
     remaining = list(examples)
     while remaining and len(rules) < max_rules:
@@ -167,17 +191,25 @@ def learn_decision_list(examples: list[tuple[str, dict, str, set]], purity: floa
             for e in hit:
                 counts[e[0]] = counts.get(e[0], 0) + 1
             label, c = max(counts.items(), key=lambda kv: (kv[1], kv[0]))
-            p = c / len(hit)
+            neg = 0.0
+            if negatives:
+                bad = matching(negatives, pred, label)
+                neg = excess_negatives(bad, matching(confirmed, pred, label), purity) if bad else 0.0
+            p = c / (len(hit) + neg)
             if p < purity:
                 continue
-            leak = sum(1 for e in examples if e[0] != label and eval_pred(pred, e[1], e[2], e[3]))
+            leak = neg + sum(1 for e in examples if e[0] != label and eval_pred(pred, e[1], e[2], e[3]))
             score = (c * p - leak, -_complexity(pred), pred_label(pred))
             if best is None or score > best[0]:
-                best = (score, pred, label, p, len(hit), hit)
+                best = (score, pred, label, p, len(hit), hit, neg)
         if best is None:
             break
-        _, pred, label, p, n, hit = best
-        rules.append({"pred": pred, "edge": label, "purity": round(p, 4), "n": n})
+        _, pred, label, p, n, hit, neg = best
+        # support: every example (not only those left for this rule) where the predicate holds and the model chose `label`
+        rule = {"pred": pred, "edge": label, "purity": round(p, 4), "n": n, "support": matching(examples, pred, label)}
+        if neg:
+            rule["neg"] = round(neg, 2)
+        rules.append(rule)
         hit_ids = {id(e) for e in hit}
         remaining = [e for e in remaining if id(e) not in hit_ids]
     return {"rules": rules} if rules else None

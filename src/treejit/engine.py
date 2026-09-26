@@ -27,6 +27,7 @@ from .tree import TreeView
 from .util import h
 
 RUN_HEADER = "x-treejit-run"
+TRUNCATED = ("max_tokens", "length", "pause_turn", "content_filter", "refusal")  # stops that don't end a task
 
 
 @dataclass
@@ -37,6 +38,7 @@ class _Pending:
     task_hash: str
     run_id: str | None
     started: float
+    n_steps: int = -1                 # steps in the episode when forwarded (to record where the model ended it)
 
 
 @dataclass
@@ -118,7 +120,7 @@ class TreeJIT:
                 rid = self.store.log_request(family=fam, run_id=run_id, dialect=dialect, tier=sub.tier, node=sub.node,
                                              note=f"{sub.reason}@{sub.used}: {labels}"[:500])
                 return Result("subcall", sub_body, req.stream, None, run_id, sub.tier, plan, self._headers(run_id, sub.tier),
-                              _Sub(rid, fam, ep.task, task_hash, run_id, t0, req, view, plan))
+                              _Sub(rid, fam, ep.task, task_hash, run_id, t0, len(ep.steps), req, view, plan))
         return self._forward(d, req, view, plan, fam, ep.task, task_hash, run_id, t0)
 
     def resume(self, result: Result, response: dict | None, status: int = 200, latency_ms: float | None = None) -> Result:
@@ -194,7 +196,7 @@ class TreeJIT:
         rid = self.store.log_request(family=fam, run_id=run_id, dialect=d.name, tier="T4", node=plan.node, note=note[:500],
                                      compacted_chars=comp.chars if comp is not None else 0)
         return Result("forward", fwd, req.stream, None, run_id, "T4", plan, self._headers(run_id, "T4"),
-                      _Pending(rid, fam, task, task_hash, run_id, t0))
+                      _Pending(rid, fam, task, task_hash, run_id, t0, len(req.episode.steps)))
 
     def complete(self, result: Result, info: ResponseInfo | None, status: int = 200, latency_ms: float | None = None) -> None:
         """Record usage/latency of a forwarded request once the upstream response is known."""
@@ -213,6 +215,11 @@ class TreeJIT:
             kw.update(input_tokens=u.input_tokens, output_tokens=u.output_tokens, cache_read=u.cache_read,
                       cache_write=u.cache_write, n_calls=len(info.calls), call_ids=json.dumps([c.id for c in info.calls]))
         self.store.update_request(ctx.request_id, **kw)
+        if (run_id and info is not None and status < 400 and not info.calls and ctx.n_steps > 0
+                and info.stop_reason not in TRUNCATED):
+            # the model ended the episode here: a final answer, no tool call. The builder turns this
+            # into an END choice at the contexts after the last step (see tree.END).
+            self.store.set_ended(run_id, ctx.n_steps)
 
     def outcome(self, run_id: str, result: str | bool, reason: str | None = None) -> list[str]:
         """Verifier signal. result: pass|fail (or True/False); 'error' (timeout, 429...) is recorded but ignored."""

@@ -19,6 +19,7 @@ This is the MVP from the handoff, plus value branching and composite argument te
 | Anthropic Messages + OpenAI Chat Completions dialects, JSON and SSE (replay and pass-through) | done |
 | Trace recorder, stable system-prompt prefix learning, span-preserving shell tokenizer | done |
 | Tree builder: anti-unification, provenance bindings, last-k-edge macros, root depth cap D | done |
+| Failed replays as negative evidence, earned task-word rules, END (the model stops here) as a choice | done |
 | T0 replay / T1 guarded branch, postcondition side exits, confidence budget, hard cap K, batching | done |
 | Read-only allowlist, commit points + operator approval, soft tombstones, node-local T4 hints | done |
 | CLI: `serve show runs explain outcome pending pin approve revoke prune export build stats`; HTML / Mermaid / SKILL.md export | done |
@@ -34,7 +35,31 @@ The core (`src/treejit`, except `proxy.py`) uses only the standard library. Prox
 
 A simulated agent works a mixed stream of coding tasks (typo fix / version bump / delete module, each with a flaky-test branch) and tau-bench-style retail tasks (branching on order status). The tree starts empty. The simulated model sees only the conversation. It is stochastic (argument formatting varies, free-form commit messages), and it takes a known-bad shortcut 6% of the time. Observations are realistically sized: `Read` returns a 45–65-line file, `pytest -q` prints 150–420 tests as progress rows plus a warnings summary, and `git status` lists untracked build junk in about a third of the tasks.
 
-> **Interim (after merging T2/T3, compaction and the operator CLI; the simulator was also made more realistic).** Seeds 0–2, edges approved, tasks 151–200: 1.00–1.02 full model calls + 0.28–0.92 small calls per task, 100% of tool calls served, 100% success vs 96% for the plain agent; compaction saves a further 3–10% of tokens. **Seed 3 regresses** (171/200 success vs 189 for the plain agent): a T1 decision list learned a task-word rule from too few runs and misroutes typo tasks. A fix is in progress; full tables will be regenerated after it.
+*Full model calls* are T4 calls (the whole conversation). *Small calls* are T2/T3 subcalls (a short prompt and a forced tool call); their tokens are included in *tokens / task*. *Served by replay* counts tool calls that no full model call produced, T2/T3 steps included. Seed 0:
+
+| mode | tasks | full model calls / task | small calls / task | tokens / task | served by replay | success | sim. wall-clock / task |
+|---|---|---|---|---|---|---|---|
+| plain agent | 151–200 | 6.02 | – | 6,196 | 0% | 96% | 10.0 s |
+| treejit, read-only allowlist | 151–200 | 3.70 | 0.14 | 4,820 | 48% | 100% | 6.3 s |
+| treejit, edges approved | 41–50 | 1.10 | 0.80 | 2,169 | 98% | 100% | 2.5 s |
+| treejit, edges approved | 151–200 | **1.06** | 0.90 | 2,038 | **99%** | 100% | 2.6 s |
+| treejit, edges approved + compaction | 151–200 | **1.06** | 0.90 | **1,981** | **99%** | 100% | 2.6 s |
+
+Seeds 0–5. Success is over all 200 tasks; the other columns are tasks 151–200 (plain agent / allowlist / approved / approved + compaction):
+
+| seed | success (of 200) | full calls / task | small calls / task | tokens / task | served |
+|---|---|---|---|---|---|
+| 0 | 193 / 198 / 200 / 200 | 6.02 / 3.70 / 1.06 / 1.06 | – / 0.14 / 0.90 / 0.90 | 6,196 / 4,820 / 2,038 / 1,981 | 0 / 48 / 99 / 99% |
+| 1 | 189 / 198 / 200 / 200 | 6.36 / 4.20 / 1.02 / 1.02 | – / 0.02 / 0.28 / 0.28 | 6,684 / 5,311 / 1,637 / 1,560 | 0 / 41 / 100 / 100% |
+| 2 | 192 / 198 / 200 / 200 | 6.32 / 4.12 / 1.00 / 1.00 | – / 0.00 / 0.78 / 0.78 | 6,711 / 5,279 / 1,931 / 1,734 | 0 / 39 / 100 / 100% |
+| 3 | 189 / 198 / 199 / 199 | 6.26 / 4.18 / 1.04 / 1.04 | – / 0.08 / 1.08 / 1.08 | 6,590 / 5,527 / 2,234 / 2,127 | 0 / 43 / 99 / 99% |
+| 4 | 185 / 198 / 199 / 199 | 6.28 / 4.08 / 1.02 / 1.02 | – / 0.10 / 1.20 / 1.20 | 6,744 / 5,513 / 2,315 / 2,248 | 0 / 45 / 100 / 100% |
+| 5 | 192 / 198 / 200 / 200 | 6.66 / 4.58 / 1.00 / 1.00 | – / 0.00 / 0.02 / 0.02 | 7,401 / 6,014 / 1,452 / 1,407 | 0 / 37 / 100 / 100% |
+
+- With edges approved (`treejit approve '*'`, which simulates operator review of write steps and commit points), almost every tool call is served from about task 40 on; the only full call left is usually the final answer. With the default read-only allowlist, only read steps replay, and T2/T3 rarely apply (their options must be replayable too).
+- treejit never does worse than the plain agent on these seeds. The remaining failures are the simulated model's own shortcuts at steps it still decides (allowlist mode), and one misroute at seed 3 (task 13, below).
+- **Seed 3 used to regress** (171/200 with edges approved, 86% success in tasks 151–200). The node after `git status` had learned the decision-list rule `task~src → git rm` from 2 delete-module tasks and 1 typo task in `README.md`. From task 13 on, it replayed `git rm` into every typo task whose file is under `src/`: 28 failed runs. The failures never reached the rule. Blame goes to edges, and `git rm` was right at that node for other tasks. Replayed steps never become examples, so the inputs the rule misrouted stopped producing evidence. Decisions 11–13 below fix this. One misroute is left (task 13): by then the rule had 5 supporting delete tasks and no counterexample, and that single failure demotes it.
+- Small calls are mostly T3 fills (the free-form commit message, the `Edit` strings) and budget checkpoints. Few of them fall back to T4 ("something else", `not_this_step`): 8 of 127 at seed 0.
 - Running the same stream through the real ASGI proxy with SSE streaming (`--via-proxy`) gives identical numbers.
 - The floor is one full model call per task, because the final answer is always generated.
 - In the simulation a small call costs about 45% of a full call's tokens (~450 vs ~1,080), because the simulated system prompt, tools and conversation are tiny. A real harness sends far more per call (Claude Code: tens of thousands of tokens), so the token column understates what T2/T3 save.
@@ -140,6 +165,15 @@ Decisions made while adding them:
 9. **Value back-off.** Once T3 serves a hole at a general (n-gram) context, the more specific contexts stop collecting model-chosen evidence, so they never become the deciding context. Their value rules are still learned from every passing instance, so a hole may borrow the rule the same edge has at a more specific context. Without this, T3 replaced free T0 steps with small calls (the version-bump commit message) and cost more tokens than it saved: 1,439 tokens/task against 1,373 before T2/T3.
 10. **One subcall, first step only.** Subcalls are only made for the first call of a response, and a T2/T3 step ends the batch.
 
+### Learning from failed replays and from where the model stops
+
+Decisions made after the seed-3 regression (see Results):
+
+11. **Failed replays are evidence against the choice that made them.** A replayed step in a failed run is a *negative* for its edge at the contexts of that step. Negatives lower the edge's purity (T0). They also count as misses for the decision-list rules that predict that edge on that input (T1). A failed run also fails every other replayed step in it, so only the *excess* counts: negatives beyond a failure rate of `1 - purity` among all replays of the same choice, passing ones included (`features.excess_negatives`). Twenty passing replays and one failure change nothing. One failure against two passing replays does.
+12. **Task-word rules must earn T1.** A decision-list rule on a task word replays only once `task_rule_support` (default 5) model-chosen examples support it. Observation rules need 2. Each excess negative adds that many again. Until then the rule's branch goes to a T2 call, or to T4 if T2 is off. The model's pick is a labelled example, so a chance rule is broken by the first input it would have misrouted, while a real one reaches its support within a few tasks. In the seed-3 scenario (`tests/test_learning.py`), the typo task under `src/` gets a T2 call instead of `git rm`, and the rule disappears.
+13. **A minority choice blocks T0 until it is outnumbered 8 to 1.** When the model has chosen more than one child at a node, the leading child's share gets one pseudo-count against it. So 4 choices against 1 (80%) is not enough to replay without looking at the input, and 8 against 1 is. Without this, seed 3 replayed `git rm pyproject.toml` into a version bump at task 8.
+14. **The model's decision to stop is a choice too.** When a forwarded response has no tool call (and did not stop for `max_tokens`/`length`), `complete()` records `runs.ended_after`. For passing runs, the builder adds an END choice at the contexts after the last step. END counts toward the node's evidence (`nodes.n_end`, included in `n_pass`) and can be a decision-list label. When END leads at the deciding context, the request goes straight to T4 with reason `end@…`, with no subcall and no replay. END is never replayed: the final answer always comes from the model. A starved specific context that has only seen END also vetoes a back-off proposal. In the synthetic suite, 192 of 200 final answers at seed 0 are recognised as END. The suite had no end-of-task subcall to save: no failed subcall there was followed by the final answer, before or after this change, and small calls per task are unchanged. The waste shows up when an n-gram context has a child after the last step, as in `test_t2_resolves_ambiguous_node` (3 small calls → 2) and `test_final_answer_is_recorded_as_end_and_not_proposed_again`, where it also prevents a wrong T0 replay.
+
 ### Frontier prefix compaction (opt-in)
 
 With `compact = true` (`TREEJIT_COMPACT=1`), a request that goes to the model (T4) is forwarded with the raw observations of *verified replayed steps* replaced by a short deterministic digest. Only the forwarded copy changes. The harness's own history, and the trace treejit records, keep the full text. The code is in `compaction.py`, called from the forward path of `engine.handle`.
@@ -174,14 +208,16 @@ Each forwarded request records `compacted N obs/C chars` in its note and the cha
 
 | seed | tokens / task (compaction off) | tokens / task (compaction on) | change | success (off → on) |
 |---|---|---|---|---|
-| 0 | 2,109 | 2,034 | −3.6% | 199 → 199 |
-| 1 | 2,044 | 1,995 | −2.4% | 200 → 200 |
-| 2 | 2,653 | 2,340 | −11.8% | 200 → 200 |
-| 3 | 2,849 | 2,666 | −6.4% | 185 → 185 |
+| 0 | 2,113 | 2,043 | −3.3% | 200 → 200 |
+| 1 | 1,892 | 1,832 | −3.2% | 200 → 200 |
+| 2 | 2,229 | 2,040 | −8.5% | 200 → 200 |
+| 3 | 2,369 | 2,243 | −5.3% | 199 → 199 |
+| 4 | 2,323 | 2,247 | −3.3% | 199 → 199 |
+| 5 | 1,877 | 1,813 | −3.4% | 200 → 200 |
 
-- Trajectories are identical, task for task, with compaction on and off.
+- Trajectories are identical, task for task, with compaction on and off. Compaction elides 230–674 observation characters per task.
 - Retail is unaffected: its observations are under 400 characters.
-- Rule 3 "path" is what limits the savings: the typo and bump `Edit`s bind `old_string` from the `Read` output, so the file is kept for the rest of the episode. Dropping that rule (an experiment, not an option) compacts 2.8× more (797 vs 288 chars/task at seed 0; tokens/task 1,894 vs 2,034) with unchanged success in this suite.
+- Rule 3 "path" is what limits the savings: the typo and bump `Edit`s bind `old_string` from the `Read` output, so the file is kept for the rest of the episode. Dropping that rule (an experiment, not an option) compacted 2.8× more (797 vs 288 chars/task at seed 0; tokens/task 1,894 vs 2,034) with unchanged success in this suite. That was measured before decisions 11–14, which changed the seed-0 trajectories slightly.
 - Compaction only acts on frontier calls. With edges approved there are few of them, often just the final answer.
 
 ## Known limits
@@ -189,7 +225,9 @@ Each forwarded request records `compacted N obs/C chars` in its note and the cha
 - **Tool execution.** treejit sees the model API, not tool execution. It backtracks its policy, not the world.
 - **Rebuild cost.** The tree is rebuilt in full for a family on each outcome (tens of ms at a few hundred runs, capped by `max_runs`). An incremental builder is future work.
 - **Stable-prefix learning.** A dynamic block early in the system prompt shrinks the learned prefix to whatever precedes it.
-- **No "stop" edge.** The tree records tool calls, not "the model finishes here". At the end of a task an n-gram context can still propose a next call. With T2/T3 on, that costs a wasted small call (the model answers "something else" or `not_this_step`) before the final T4 call.
+- **One misroute before a chance rule is caught.** A task-word rule whose first `task_rule_support` examples all agree by chance still replays once into the input that breaks it; the failed run then demotes it (seed 3, task 13). A higher `task_rule_support` trades small calls for fewer of these.
+- **Negatives are counted per rule, not per input class.** A rule with many passing replays that starts misrouting a new kind of task needs several failures before the excess over the tolerated rate (`1 - purity`) shows. Only then is it demoted.
+- **END needs a passing run and a visible final answer.** Streams consumed outside the engine (inline-mode streaming) don't record where the model stopped, and runs without an outcome never add END evidence.
 - **Compaction and the prompt cache.** The keep-last window moves as the conversation grows. The step that leaves it changes from full to compacted once, which invalidates the cache from that message on. A chunked boundary (advancing the window only every few steps) would trade a little compaction for longer cache hits; it isn't implemented.
 - **Run identity.** Without an `X-TreeJIT-Run` header, run ids are derived from the task and first tool-call id. Resuming the same task text in a new conversation starts a new run.
 
@@ -197,7 +235,7 @@ Each forwarded request records `compacted N obs/C chars` in its note and the cha
 
 ```bash
 pip install -e '.[dev]' -e bench
-pytest -q                                   # 46 tests, ~2 s
+pytest -q                                   # 70 tests, ~3 s
 python -m treejit_bench --tasks 200 --out bench_out [--via-proxy] [--seed N] [--family coding|retail|mixed] \
     [--modes baseline,treejit,treejit+ok,treejit+ok+compact]
 ```

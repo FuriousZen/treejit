@@ -12,7 +12,7 @@ from typing import Any
 from .bindings import rule_label
 from .features import pred_label
 from .store import Store
-from .tree import node_id
+from .tree import END, node_id
 from .util import short
 
 TIER_COLORS = {"hot": "#d9480f", "live": "#e8a33d", "warm": "#9fb83a", "cold": "#8a94a6", "tomb": "#343a40"}
@@ -111,7 +111,7 @@ def show_text(store: Store, family: str | None = None, ids: bool = False, max_de
 
 
 def _stump_text(dl: dict, items: list[dict]) -> str:
-    labels = {it["edge"]: short(it["label"], 30) for it in items}
+    labels = {it["edge"]: short(it["label"], 30) for it in items} | {END: "END (final answer)"}
     parts = [f"if {pred_label(r['pred'])} → {labels.get(r['edge'], r['edge'])}" for r in dl["rules"]]
     parts.append("else → model")
     return "; ".join(parts)
