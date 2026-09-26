@@ -1,0 +1,7 @@
+non-streaming run after training: upstream calls = 1 (replayed steps served locally)
+streaming run after training:     upstream calls = 3 (expected 1 if replayed)
+  streamed tool ids: ['toolu_m00000004', 'toolu_m00000005'] (no '_tj_' marker -> nothing replayed)
+  run probe-json: runs row=yes, steps=2, requests logged=2, ended_after=2
+  run probe-sse: runs row=NO, steps=0, requests logged=0, ended_after=None
+  headers the upstream saw on the last streaming call: {'X-TreeJIT-Run': 'probe-sse'}
+  headers the upstream saw on the last non-streaming call: {}

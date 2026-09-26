@@ -1,0 +1,87 @@
+orphan request rows (family set, run_id NULL): 0
+tasks with !=1 run id in headers: 0; tasks whose 'latest' outcome hit a different run: 0
+runs left without outcome: 0
+runs whose explain tokens != requests-table tokens: 0; tier-count mismatches vs response headers: 0
+requests by tier over all runs (explain): {'T4': 124, 'T0': 242, 'T2': 31, 'T1': 87, 'T3': 21}
+requests by tier (table, family not null): {'T0': 242, 'T1': 87, 'T2': 31, 'T3': 21, 'T4': 124}
+
+$ treejit explain r_fae6df135131790f --db E4_treejit+ok_s0.db
+run r_fae6df135131790f  family=0941b417  outcome=pass
+task: 'email: emma.patel57@example.com⏎I changed my mind about order #W9746862. Can you help?'
+4 tool calls, 3 replayed; 2 model call(s), 2543 tokens; requests by tier: T0=2 T2=1 T4=2
+
+  #0  T0       find_user_id_by_email(emma.patel57@example.com)
+        why: T0@r0 find_user_id_by_email(email=$email) conf=0.75
+        obs: emma_patel_8815
+  #1  T0       get_user_details(emma_patel_8815)
+        why: T0@r1 get_user_details(user_id=$user_id) conf=0.75
+        obs: {"user_id": "emma_patel_8815", "email": "emma.patel57@example.com", "…
+  #2  T2       get_order_details(#W9746862) tok=397
+        why: budget@r2: get_order_details(order_id=$order_id); ok: get_order_details(order_id=$order_id)
+        obs: {"order_id": "#W9746862", "user_id": "emma_patel_8815", "status": "pe…
+  #3  model    cancel_pending_order(order_id="#W9746862", reason="no longer needed") tok=1039
+        why: ambiguous@r3
+        obs: {"order_id": "#W9746862", "status": "cancelled"}
+   -  model    (no tool call: final answer) tok=1107
+        why: off_tree
+
+
+$ treejit explain r_01affb4f60d83e19 --db E4_treejit+ok_s0.db
+run r_01affb4f60d83e19  family=d6cb07fd  outcome=pass
+task: "There's a spelling mistake in src/cli/main.py: 'recieve' should be 'receive'. Please fix it, test, …"
+8 tool calls, 8 replayed; 1 model call(s), 3298 tokens; requests by tier: T0=4 T1=1 T2=1 T3=1 T4=1
+
+  #0  T0       Bash(git status --short)
+        why: T0@r0 Bash(git status --short) conf=0.69
+  #1  T0       Read(src/cli/main.py)
+        why: T0@r1 Read(file_path=$file_path) conf=0.92
+        obs: 1	# src/cli/main.py
+  #2  T1       Edit(file_path="src/cli/main.py", new_string="receive", old_string="recieve")
+        why: T1@r2 Edit(file_path=$file_path, new_string=$new_string, old_string=$old_string) conf=0.90
+        obs: The file src/cli/main.py has been updated.
+  #3  T0       Bash(python -m pytest -q)
+        why: T0@r3 Bash(python -m pytest -q $0) conf=0.90
+        error: F....................................................................…
+  #4  T2       Bash(python -m pytest -q --lf) tok=929
+        why: budget@r4: Bash(python -m pytest -q $0); ok: Bash(python -m pytest -q $0)
+        obs: .                                                                    …
+  #5  T0       Bash(git add src/cli/main.py)
+        why: T0@r5 Bash(git add $0) conf=0.83
+  #6  T3       Bash(git commit -m 'Fix typo in src/cli/main.py') tok=649
+        why: holes@g2: Bash(git commit -m $0); ok: Bash(git commit -m $0)
+        obs: [main a5190cb] Fix typo in src/cli/main.py
+  #7  T0       Bash(git push origin main)
+        why: T0@g3 Bash(git push origin main) conf=0.91
+        obs: To github.com:acme/app.git
+   -  model    (no tool call: final answer) tok=1720
+        why: end@r8
+
+
+$ treejit explain r_c1d4c197dfcb45ce --db E4_treejit+ok_s0.db
+run r_c1d4c197dfcb45ce  family=d6cb07fd  outcome=pass
+task: "There's a spelling mistake in src/db/models.py: 'recieve' should be 'receive'. Please fix it, test,…"
+7 tool calls, 7 replayed; 1 model call(s), 2411 tokens; requests by tier: T0=3 T1=2 T2=1 T4=1
+
+  #0  T0       Bash(git status --short)
+        why: T0@r0 Bash(git status --short) conf=0.73
+        obs: ?? .coverage
+  #1  T0       Read(src/db/models.py)
+        why: T0@r1 Read(file_path=$file_path) conf=0.95
+        obs: 1	# src/db/models.py
+  #2  T1       Edit(file_path="src/db/models.py", new_string="receive", old_string="recieve")
+        why: T1@r2 Edit(file_path=$file_path, new_string=$new_string, old_string=$old_string) conf=0.94
+        obs: The file src/db/models.py has been updated.
+  #3  T0       Bash(python -m pytest -q)
+        why: T0@r3 Bash(python -m pytest -q $0) conf=0.94
+        obs: .....................................................................…
+  #4  T1       Bash(git add src/db/models.py)
+        why: T1@r4 Bash(git add $0) conf=0.91
+  #5  T0       Bash(git commit -m 'Fix typo in src/db/models.py')
+        why: T0@g2 Bash(git commit -m $0) conf=0.94
+        obs: [main e910fc8] Fix typo in src/db/models.py
+  #6  T2       Bash(git push origin main) tok=687
+        why: budget@g3: Bash(git push origin main); ok: Bash(git push origin main)
+        obs: To github.com:acme/app.git
+   -  model    (no tool call: final answer) tok=1724
+        why: end@r7
+

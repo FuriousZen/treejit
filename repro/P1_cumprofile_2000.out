@@ -1,0 +1,35 @@
+build (unprofiled) 2220 ms
+         7757803 function calls (7757050 primitive calls) in 5.137 seconds
+   Ordered by: cumulative time
+   List reduced from 275 to 30 due to restriction <30>
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.360    0.360    5.272    5.272 treejit/builder.py:105(build_family)
+    42138    0.306    0.000    1.350    0.000 treejit/shellwords.py:34(tokenize)
+    27766    0.072    0.000    1.262    0.000 treejit/templates.py:47(shape_of)
+    51565    0.039    0.000    0.924    0.000 treejit/tree.py:26(node_id)
+    20992    0.100    0.000    0.906    0.000 treejit/shellwords.py:353(command_heads)
+   154746    0.718    0.000    0.885    0.000 treejit/shellwords.py:93(_read_word)
+    51573    0.244    0.000    0.885    0.000 treejit/util.py:18(h)
+    79347    0.058    0.000    0.730    0.000 treejit/util.py:13(canon)
+        1    0.000    0.000    0.713    0.713 treejit/builder.py:118(<dictcomp>)
+        8    0.005    0.001    0.712    0.089 treejit/templates.py:108(anti_unify)
+    88273    0.140    0.000    0.703    0.000 json/__init__.py:183(dumps)
+    13883    0.093    0.000    0.580    0.000 treejit/templates.py:146(call_slots)
+    88273    0.128    0.000    0.508    0.000 json/encoder.py:183(encode)
+        6    0.005    0.001    0.359    0.060 treejit/templates.py:113(<listcomp>)
+    87547    0.347    0.000    0.347    0.000 json/encoder.py:205(iterencode)
+        6    0.013    0.002    0.328    0.055 treejit/templates.py:90(unify_tokens)
+       37    0.023    0.001    0.262    0.007 treejit/templates.py:82(common_subsequence)
+    14683    0.054    0.000    0.248    0.000 treejit/features.py:57(obs_features)
+        1    0.061    0.061    0.229    0.229 treejit/builder.py:72(load_runs)
+   107/76    0.003    0.000    0.226    0.003 treejit/bindings.py:245(find_rule)
+       35    0.017    0.000    0.157    0.004 treejit/features.py:157(learn_decision_list)
+       27    0.000    0.000    0.154    0.006 treejit/bindings.py:336(_find_fmt)
+       45    0.004    0.000    0.153    0.003 treejit/bindings.py:344(_find_fmt_with)
+    11660    0.052    0.000    0.148    0.000 difflib.py:421(get_matching_blocks)
+    29548    0.140    0.000    0.140    0.000 {method 'search' of 're.Pattern' objects}
+  1527649    0.137    0.000    0.137    0.000 {method 'append' of 'list' objects}
+    15882    0.068    0.000    0.137    0.000 treejit/tree.py:30(contexts)
+       84    0.123    0.001    0.135    0.002 treejit/builder.py:248(<listcomp>)
+    10496    0.046    0.000    0.133    0.000 treejit/templates.py:124(match_sh)
+    18234    0.047    0.000    0.123    0.000 json/__init__.py:299(loads)

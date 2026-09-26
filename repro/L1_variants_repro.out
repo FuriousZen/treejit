@@ -1,0 +1,24 @@
+== base
+A calls: [('Bash', {'command': 'git status'}), ('Bash', {'command': 'git rm src/net/timeparse.py'})]
+A small calls: 0 | tiers: [('T0', 'T0@r0 Bash(git status) conf=0.89'), ('T1', 'T1@r1 Bash(git rm $0) conf=0.86'), ('T4', 'end@r2')]
+A: L1 REPRODUCED (file deleted by T1 replay)
+B calls: [('Bash', {'command': 'git status'}), ('Bash', {'command': 'git rm src/legacy/foxtrot.py'})] | small calls: 0 | tiers: ['T0', 'T1', 'T4']
+B: known class still replays via T1
+== dedup
+A calls: [('Bash', {'command': 'git status'}), ('Bash', {'command': 'git rm src/net/timeparse.py'})]
+A small calls: 0 | tiers: [('T0', 'T0@r0 Bash(git status) conf=0.89'), ('T1', 'T1@r1 Bash(git rm $0) conf=0.86'), ('T4', 'end@r2')]
+A: L1 REPRODUCED (file deleted by T1 replay)
+B calls: [('Bash', {'command': 'git status'}), ('Bash', {'command': 'git rm src/legacy/foxtrot.py'})] | small calls: 0 | tiers: ['T0', 'T1', 'T4']
+B: known class still replays via T1
+== novel
+A calls: [('Bash', {'command': 'git status'}), ('Read', {'file_path': 'src/net/timeparse.py'})]
+A small calls: 1 | tiers: [('T0', 'T0@r0 Bash(git status) conf=0.89'), ('T2', 'ambiguous@r1: Bash(git rm $0) | Read(file_path=$file_path); ok: Read(file_path=$file_path)'), ('T4', 'end@r2')]
+A: L1 not reproduced (asked first)
+B calls: [('Bash', {'command': 'git status'}), ('Bash', {'command': 'git rm src/legacy/foxtrot.py'})] | small calls: 0 | tiers: ['T0', 'T1', 'T4']
+B: known class still replays via T1
+== sup10
+A calls: [('Bash', {'command': 'git status'}), ('Read', {'file_path': 'src/net/timeparse.py'})]
+A small calls: 1 | tiers: [('T0', 'T0@r0 Bash(git status) conf=0.89'), ('T2', 'ambiguous@r1: Bash(git rm $0) | Read(file_path=$file_path); ok: Read(file_path=$file_path)'), ('T4', 'end@r2')]
+A: L1 not reproduced (asked first)
+B calls: [('Bash', {'command': 'git status'}), ('Bash', {'command': 'git rm src/legacy/foxtrot.py'})] | small calls: 1 | tiers: ['T0', 'T2', 'T4']
+B: REGRESSION (known class not replayed by T1)

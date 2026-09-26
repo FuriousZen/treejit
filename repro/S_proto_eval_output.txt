@@ -1,0 +1,119 @@
+S1 opaque executors (want commit=1 except local runners):
+  'python -c \'import os; os.system("git push")\''         old=0 new=1 interpreter             
+  'python3 scripts/release.py'                             old=0 new=1 interpreter             
+  "node -e 'x()'"                                          old=0 new=1 interpreter             
+  "perl -e 'system(1)'"                                    old=0 new=1 interpreter             
+  "ruby -e 'x'"                                            old=0 new=1 interpreter             
+  'make deploy'                                            old=0 new=1 task runner             
+  'npm run release'                                        old=0 new=1 package script          
+  'yarn release'                                           old=0 new=1 yarn script             
+  './deploy.sh'                                            old=0 new=1 script path             
+  'bash scripts/push.sh'                                   old=0 new=1 shell                   
+  'git p'                                                  old=0 new=1 git alias/extension     
+  'git -c alias.p=push p'                                  old=0 new=1 git -c/--exec-path      
+  'gh repo delete o/r --yes'                               old=0 new=1 gh write                
+  'gh api -X POST repos/o/r/issues'                        old=0 new=1 gh api write            
+  'gh workflow run d.yml'                                  old=0 new=1 gh write                
+  'curl -X POST https://x'                                 old=1 new=1 curl                    
+  'npx vercel --prod'                                      old=0 new=1 package runner          
+  'uv run scripts/pub.py'                                  old=0 new=1 script path             
+  'python -m pytest -q'                                    old=0 new=0                         
+  'python -m pytest -q --lf'                               old=0 new=0                         
+  'pytest -x'                                              old=0 new=0                         
+  'python -m unittest'                                     old=0 new=0                         
+  'tox -e py311'                                           old=0 new=0                         
+  'cargo test'                                             old=0 new=0                         
+  'go test ./...'                                          old=0 new=0                         
+  'npm test'                                               old=0 new=0                         
+  'npm run test:unit'                                      old=0 new=0                         
+  'npm run build'                                          old=0 new=0                         
+  'make test'                                              old=0 new=0                         
+  'make'                                                   old=0 new=1 task runner             
+  'uv run pytest'                                          old=0 new=0                         
+  'poetry run pytest -q'                                   old=0 new=0                         
+  'git add x'                                              old=0 new=0                         
+  "git commit -m 'x'"                                      old=0 new=0                         
+  'git rm x'                                               old=0 new=0                         
+  'git status'                                             old=0 new=0                         
+  'mkdir -p a && touch a/b'                                old=0 new=0                         
+  'sed -i s/a/b/ f'                                        old=0 new=0                         
+  'cp a b'                                                 old=0 new=0                         
+  'pip install -e .'                                       old=0 new=0                         
+S2 bash-parity (all push in bash => want 1):
+  "$'\\147it' push"                                        old=1 new=1 non-literal program     
+  "$'\\x67it' push"                                        old=1 new=1 non-literal program     
+  "git $'\\160ush'"                                        old=1 new=1 non-literal git subcomma
+  '$"git" push'                                            old=1 new=1 non-literal program     
+  '{git,push}'                                             old=0 new=1 non-literal program     
+  'git {push,}'                                            old=0 new=1 non-literal git subcomma
+  'git${IFS}push'                                          old=0 new=1 non-literal program     
+  'a=(git); a+=(push); "${a[@]}"'                          old=0 new=1 non-literal program     
+  'x=push; git $x'                                         old=0 new=1 non-literal git subcomma
+  'g=git; $g push'                                         old=0 new=1 non-literal program     
+  'git "$(echo push)"'                                     old=0 new=1 non-literal git subcomma
+  'git `echo push`'                                        old=0 new=1 non-literal git subcomma
+  'f(){ git "$@"; }; f push'                               old=0 new=1 non-literal git subcomma
+  "bash <<< 'git push'"                                    old=0 new=1 shell                   
+  'echo Z2l0IHB1c2g= | base64 -d | sh'                     old=0 new=1 shell                   
+  'git send-pack origin main'                              old=0 new=1 git send-pack           
+  "bash -c $'\\147it push'"                                old=1 new=1 shell                   
+  "sh -c 'x=push; git $x'"                                 old=0 new=1 shell                   
+  'eval "git \\${IFS}push"'                                old=0 new=1 non-literal git subcomma
+  'env git${IFS}push'                                      old=0 new=1 non-literal program     
+  'git -C repo push'                                       old=1 new=1 git push                
+  'xargs -n1 git push < r'                                 old=1 new=1 git push                
+  'find . -exec git push \\;'                              old=1 new=1 git push                
+S3 false-positive table:
+  'git stash push'                                         old=1 new=0                         
+  'git stash push -m wip src/x.py'                         old=1 new=0                         
+  'git checkout push'                                      old=1 new=0                         
+  'git branch -D push'                                     old=1 new=0                         
+  'git fetch origin push'                                  old=1 new=0                         
+  'git log origin/push'                                    old=0 new=0                         
+  'git worktree add ../push'                               old=0 new=0                         
+  'git rebase origin/push'                                 old=0 new=0                         
+  'git push --dry-run'                                     old=1 new=1 git push                  <-- WRONG
+  'git push -n origin main'                                old=1 new=1 git push                  <-- WRONG
+  'apt install curl'                                       old=1 new=0                         
+  'apt-get install -y curl wget'                           old=1 new=0                         
+  'pip install requests curl'                              old=1 new=0                         
+  'brew install rsync'                                     old=1 new=0                         
+  'npm install ssh2 && npm run build'                      old=0 new=0                         
+  'man ssh'                                                old=1 new=0                         
+  'mkdir ssh'                                              old=1 new=0                         
+  'rm -rf wget'                                            old=1 new=0                         
+  'chmod 700 ssh'                                          old=1 new=0                         
+  'echo push > f'                                          old=0 new=0                         
+  "echo 'git push' > NOTES"                                old=0 new=0                         
+  'npm run push-docs'                                      old=0 new=1 package script            <-- WRONG
+  "sed -i 's/curl/wget/' Dockerfile"                       old=0 new=0                         
+  'curl -s localhost:8000/health'                          old=1 new=0                         
+  'curl -sSf http://127.0.0.1:3000/ -o /dev/null'          old=1 new=0                         
+  'wget -qO- http://localhost:8080'                        old=1 new=0                         
+  'rsync -a src/ build/'                                   old=1 new=1 rsync                     <-- WRONG
+  'gh pr view 12'                                          old=1 new=0                         
+  'gh pr list'                                             old=1 new=0                         
+  'gh pr diff 12'                                          old=1 new=0                         
+  'gh pr checks 12'                                        old=1 new=0                         
+  'gh release list'                                        old=1 new=0                         
+  'gh release view v1'                                     old=1 new=0                         
+  'kubectl apply --dry-run=client -f x.yaml'               old=1 new=1 kubectl apply             <-- WRONG
+  'npm publish --dry-run'                                  old=1 new=1 npm publish               <-- WRONG
+  'cargo publish --dry-run'                                old=1 new=1 cargo publish             <-- WRONG
+  'docker compose push'                                    old=1 new=1 docker push             
+  'git push origin main'                                   old=1 new=1 git push                
+  'docker push img:1'                                      old=1 new=1 docker push             
+  'gh pr create -f'                                        old=1 new=1 gh write                
+  'gh pr merge 3'                                          old=1 new=1 gh write                
+  'curl -X POST https://api.x/y'                           old=1 new=1 curl                    
+  "ssh prod 'systemctl restart app'"                       old=1 new=1 ssh                     
+  'scp dist.tgz prod:/srv'                                 old=1 new=1 scp                     
+  'kubectl delete pod x'                                   old=1 new=1 kubectl delete          
+  'python -m pytest -q'                                    old=0 new=0                         
+  'pytest -q'                                              old=0 new=0                         
+  'npm test'                                               old=0 new=0                         
+  'cargo test'                                             old=0 new=0                         
+  'go test ./...'                                          old=0 new=0                         
+  'make test'                                              old=0 new=0                         
+
+correct: S1 40/40  S2 23/23  S3 44/51

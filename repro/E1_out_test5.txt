@@ -1,0 +1,3 @@
+baseline     n=5    full/task=10.20 small/task=0.00 tok/task=  58,381 served=   0% reward=1.00 slip_tasks=0 fail_without_slip=[] (1.4s)
+treejit      n=5    full/task= 7.60 small/task=0.80 tok/task=  46,532 served=  31% reward=1.00 slip_tasks=0 fail_without_slip=[] (2.1s)
+treejit+ok   n=5    full/task= 7.60 small/task=0.80 tok/task=  46,532 served=  31% reward=1.00 slip_tasks=0 fail_without_slip=[] (2.0s)

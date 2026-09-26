@@ -1,0 +1,13 @@
+node r1 = cfff4d32b2e3 n_pass = 8
+  child Read(file_path=$file_path)               pass_n=3 purity=0.375 tier=hot
+  child Bash(git rm $0)                          pass_n=5 purity=0.625 tier=hot
+  rule ['task', 'src'] -> Bash(git rm $0) {'n': 5, 'purity': 1.0, 'support': 5}
+  rule ['task', 'version'] -> Read(file_path=$file_path) {'n': 2, 'purity': 1.0, 'support': 2}
+task 13 words: ['commit', 'correct', 'definately', 'definitely', 'push', 'ship', 'src', 'tests', 'timeparse', 'utils']
+fires: ['task', 'src'] -> Bash(git rm $0) support 5 >= task_rule_support 5
+examples supporting task~src at r1:
+   task-3-1 ['change', 'delete', 'deprecated', 'module', 'push', 'src', 'unused', 'utils']
+   task-3-2 ['code', 'commit', 'dead', 'legacy', 'pass', 'push', 'remove', 'src', 'tests', 'v1_client']
+   task-3-3 ['code', 'commit', 'dead', 'legacy', 'pass', 'push', 'remove', 'src', 'tests', 'v1_client']
+   task-3-4 ['code', 'commit', 'dead', 'pass', 'push', 'remove', 'src', 'tests', 'xml_reader']
+   task-3-6 ['change', 'delete', 'legacy', 'module', 'push', 'src', 'unused', 'v1_client']

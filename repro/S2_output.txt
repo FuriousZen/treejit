@@ -1,0 +1,46 @@
+command                                  bash runs        ro commit heads  EXPLOIT
+'git push'                               git push          0      1 ['git push'] 
+"$'\\147it' push"                        git push          0      0 ['147it'] COMMIT-MISS
+"$'\\x67it' push"                        git push          0      0 ['x67it'] COMMIT-MISS
+"git $'\\160ush'"                        git push          0      0 ['git'] COMMIT-MISS
+"git $'\\x70ush'"                        git push          0      0 ['git x70ush'] COMMIT-MISS
+'$"git" push'                            git push          0      0 ['$git'] COMMIT-MISS
+'git $"push"'                            git push          0      0 ['git'] COMMIT-MISS
+'gi\\\nt push'                           git push          0      1 ['git push'] 
+'git \\\npush'                           git push          0      1 ['git push'] 
+'{git,push}'                             git push          0      0 ['{git,push}'] COMMIT-MISS
+'git {push,}'                            git push          0      0 ['git'] COMMIT-MISS
+'g""it push'                             git push          0      1 ['git push'] 
+'gi\\t push'                             git push          0      1 ['git push'] 
+'"git" push'                             git push          0      1 ['git push'] 
+"'git' push"                             git push          0      1 ['git push'] 
+'command git push'                       git push          0      1 ['git push'] 
+'exec -a name git push'                  git push          0      1 ['git push'] 
+"env -S 'git push'"                      git push          0      1 ['env'] 
+'git${IFS}push'                          git push          0      0 ['git${IFS}push'] COMMIT-MISS
+"git$IFS'push'"                          git push          0      0 ['git$IFSpush'] COMMIT-MISS
+'git\tpush'                              git push          0      1 ['git push'] 
+'a=(git push); "${a[@]}"'                git push          0      1 ['git push', '${a[@]}'] 
+'a=(git); a+=(push); "${a[@]}"'          git push          0      0 ['git', 'a+=', 'push', '${a[@]}'] COMMIT-MISS
+'x=push; git $x'                         git push          0      0 ['git'] COMMIT-MISS
+'p=pu; git ${p}sh'                       git push          0      0 ['git'] COMMIT-MISS
+'g=git; $g push'                         git push          0      0 ['$g'] COMMIT-MISS
+'git "$(echo push)"'                     git push          0      0 ['git'] COMMIT-MISS
+'git $(printf push)'                     git push          0      0 ['git'] COMMIT-MISS
+'git `echo push`'                        git push          0      0 ['git'] COMMIT-MISS
+'f(){ git "$@"; }; f push'               git push          0      0 ['f', '{', '}', 'f'] COMMIT-MISS
+"bash <<< 'git push'"                    git push          0      0 ['bash'] COMMIT-MISS
+"sh<<<'git push'"                        git push          0      0 ['sh'] COMMIT-MISS
+'echo Z2l0IHB1c2g= | base64 -d | sh'     git push          0      0 ['echo', 'base64', 'sh'] COMMIT-MISS
+"printf 'git push' | bash"               git push          0      1 ['printf', 'bash'] 
+'git -c alias.p=push p'                  git -c alias.p=p  0      0 ['git'] 
+'git send-pack origin main'              git send-pack or  0      0 ['git send-pack'] COMMIT-MISS
+'git --git-dir=.git push'                git --git-dir=.g  0      1 ['git'] 
+"bash -c $'\\147it push'"                git push          0      0 ['bash'] COMMIT-MISS
+'bash -c "\\$\'\\\\147it\' push"'        git push          0      0 ['bash'] COMMIT-MISS
+'env git${IFS}push'                      git push          0      0 ['git${IFS}push'] COMMIT-MISS
+"sh -c 'x=push; git $x'"                 git push          0      0 ['sh'] COMMIT-MISS
+'eval "git \\${IFS}push"'                git push          0      0 ['eval'] COMMIT-MISS
+'\\git push'                             git push          0      1 ['git push'] 
+'git pus\\h'                             git push          0      1 ['git push'] 
+"git 'pu'sh"                             git push          0      1 ['git push'] 

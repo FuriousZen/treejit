@@ -1,0 +1,5 @@
+base   seeds=6 success=1198/1200 per-seed=[200, 200, 200, 199, 199, 200] small/task(all)=0.675 tok/task(all)=2134 small(151-200)=0.710 tok(151-200)=1934
+dedup  seeds=6 success=1199/1200 per-seed=[200, 200, 200, 200, 199, 200] small/task(all)=0.722 tok/task(all)=2152 small(151-200)=0.813 tok(151-200)=2007
+novel  seeds=6 success=1199/1200 per-seed=[200, 200, 200, 200, 199, 200] small/task(all)=0.688 tok/task(all)=2123 small(151-200)=0.717 tok(151-200)=1916
+sup10  seeds=6 success=1199/1200 per-seed=[200, 200, 200, 200, 199, 200] small/task(all)=0.642 tok/task(all)=2112 small(151-200)=0.637 tok(151-200)=1898
+knn    seeds=6 success=1199/1200 per-seed=[200, 200, 200, 200, 199, 200] small/task(all)=0.688 tok/task(all)=2123 small(151-200)=0.717 tok(151-200)=1916

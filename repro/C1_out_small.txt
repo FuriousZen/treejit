@@ -1,0 +1,123 @@
+
+=== pattern: dense  (system chars=392) ===
+-- off: per forwarded request (tokens): total / common-prefix-with-prev / cache-read / billed-equiv
+   req 1  T=  1021  common=     0  read=     0  billed=  1277
+   req 2  T=  1887  common=  1021  read=  1021  billed=  1185
+   req 3  T=  2753  common=  1887  read=  1887  billed=  1271
+   req 4  T=  3619  common=  2753  read=  2753  billed=  1358
+   req 5  T=  4485  common=  3619  read=  3619  billed=  1444
+   req 6  T=  5351  common=  4485  read=  4485  billed=  1531
+   req 7  T=  6217  common=  5351  read=  5351  billed=  1618
+   req 8  T=  7083  common=  6217  read=  6217  billed=  1704
+   req 9  T=  7949  common=  7083  read=  7083  billed=  1791
+   req10  T=  8815  common=  7949  read=  7949  billed=  1877
+   req11  T=  9694  common=  8815  read=  8815  billed=  1980
+   req12  T= 10573  common=  9694  read=  9694  billed=  2068
+   req13  T= 11452  common= 10573  read= 10573  billed=  2156
+   req14  T= 12330  common= 11452  read= 11452  billed=  2244
+   req15  T= 13209  common= 12330  read= 12330  billed=  2332
+-- current: per forwarded request (tokens): total / common-prefix-with-prev / cache-read / billed-equiv
+   req 1  T=  1021  common=     0  read=     0  billed=  1277
+   req 2  T=  1887  common=  1021  read=  1021  billed=  1185
+   req 3  T=  2753  common=  1887  read=  1887  billed=  1271
+   req 4  T=  2902  common=   198  read=   147  billed=  3458
+   req 5  T=  3050  common=   346  read=   147  billed=  3643
+   req 6  T=  3198  common=   494  read=   147  billed=  3829
+   req 7  T=  3346  common=   642  read=   147  billed=  4014
+   req 8  T=  3495  common=   791  read=   147  billed=  4199
+   req 9  T=  3643  common=   939  read=   147  billed=  4385
+   req10  T=  3791  common=  1087  read=   147  billed=  4570
+   req11  T=  3952  common=  1235  read=   147  billed=  4771
+   req12  T=  4113  common=  1384  read=   147  billed=  4973
+   req13  T=  4274  common=  1532  read=   147  billed=  5174
+   req14  T=  4423  common=  1680  read=   147  billed=  5360
+   req15  T=  4573  common=  1830  read=   147  billed=  5547
+-- first-sight: per forwarded request (tokens): total / common-prefix-with-prev / cache-read / billed-equiv
+   req 1  T=  1021  common=     0  read=     0  billed=  1277
+   req 2  T=  1887  common=  1021  read=  1021  billed=  1185
+   req 3  T=  2753  common=  1887  read=  1887  billed=  1271
+   req 4  T=  3619  common=  2753  read=  2753  billed=  1358
+   req 5  T=  4485  common=  3619  read=  3619  billed=  1444
+   req 6  T=  5351  common=  4485  read=  4485  billed=  1531
+   req 7  T=  6217  common=  5351  read=  5351  billed=  1618
+   req 8  T=  7083  common=  6217  read=  6217  billed=  1704
+   req 9  T=  7949  common=  7083  read=  7083  billed=  1791
+   req10  T=  8815  common=  7949  read=  7949  billed=  1877
+   req11  T=  9694  common=  8815  read=  8815  billed=  1980
+   req12  T= 10573  common=  9694  read=  9694  billed=  2068
+   req13  T= 11452  common= 10573  read= 10573  billed=  2156
+   req14  T= 12330  common= 11452  read= 11452  billed=  2244
+   req15  T= 13209  common= 12330  read= 12330  billed=  2332
+
+   policy       reqs  sum input tok  cache read  billed-equiv  vs off (raw)  vs off (billed)
+   off            15        106,438      93,229        25,836         +0.0%            +0.0%
+   current        15         50,421       4,672        57,657        -52.6%          +123.2%
+   chunk-3        15         59,046      34,387        34,263        -44.5%           +32.6%
+   chunk-5        15         66,964      48,025        28,478        -37.1%           +10.2%
+   current+bp     15         50,421      14,550        46,296        -52.6%           +79.2%
+   chunk-3+bp     15         59,046      37,081        31,165        -44.5%           +20.6%
+   first-sight    15        106,438      93,229        25,836         +0.0%            +0.0%
+
+=== pattern: interleaved  (system chars=392) ===
+-- off replayed_steps=8: per forwarded request (tokens): total / common-prefix-with-prev / cache-read / billed-equiv
+   req 1  T=  1021  common=     0  read=     0  billed=  1277
+   req 2  T=  1946  common=  1021  read=  1021  billed=  1258
+   req 3  T=  2871  common=  1946  read=  1946  billed=  1351
+   req 4  T=  3796  common=  2871  read=  2871  billed=  1443
+   req 5  T=  4721  common=  3796  read=  3796  billed=  1536
+   req 6  T=  5659  common=  4721  read=  4721  billed=  1644
+   req 7  T=  6597  common=  5659  read=  5659  billed=  1738
+   req 8  T=  7535  common=  6597  read=  6597  billed=  1832
+-- current replayed_steps=8: per forwarded request (tokens): total / common-prefix-with-prev / cache-read / billed-equiv
+   req 1  T=  1021  common=     0  read=     0  billed=  1277
+   req 2  T=  1946  common=  1021  read=  1021  billed=  1258
+   req 3  T=  2154  common=   198  read=   147  billed=  2523
+   req 4  T=  2361  common=   405  read=   147  billed=  2782
+   req 5  T=  2568  common=   612  read=   147  billed=  3041
+   req 6  T=  2788  common=   819  read=   147  billed=  3316
+   req 7  T=  3008  common=  1027  read=   147  billed=  3592
+   req 8  T=  3217  common=  1234  read=   147  billed=  3852
+-- first-sight replayed_steps=8: per forwarded request (tokens): total / common-prefix-with-prev / cache-read / billed-equiv
+   req 1  T=  1021  common=     0  read=     0  billed=  1277
+   req 2  T=  1946  common=  1021  read=  1021  billed=  1258
+   req 3  T=  2871  common=  1946  read=  1946  billed=  1351
+   req 4  T=  3796  common=  2871  read=  2871  billed=  1443
+   req 5  T=  4721  common=  3796  read=  3796  billed=  1536
+   req 6  T=  5659  common=  4721  read=  4721  billed=  1644
+   req 7  T=  6597  common=  5659  read=  5659  billed=  1738
+   req 8  T=  7535  common=  6597  read=  6597  billed=  1832
+
+   policy       reqs  sum input tok  cache read  billed-equiv  vs off (raw)  vs off (billed)
+   off             8         34,146      26,611        12,081         +0.0%            +0.0%
+   current         8         19,063       1,903        21,642        -44.2%           +79.1%
+   chunk-3         8         20,498       6,123        18,583        -40.0%           +53.8%
+   chunk-5         8         22,662      11,708        14,865        -33.6%           +23.0%
+   current+bp      8         19,063       4,759        18,358        -44.2%           +52.0%
+   chunk-3+bp      8         20,498       8,044        16,374        -40.0%           +35.5%
+   first-sight     8         34,146      26,611        12,081         +0.0%            +0.0%
+
+=== pattern: bursty  (system chars=392) ===
+-- off replayed_steps=12: per forwarded request (tokens): total / common-prefix-with-prev / cache-read / billed-equiv
+   req 1  T=  3619  common=     0  read=     0  billed=  4525
+   req 2  T=  7142  common=  3619  read=  3619  billed=  4766
+   req 3  T= 10716  common=  7142  read=  7142  billed=  5182
+   req 4  T= 10776  common= 10716  read= 10716  billed=  1146
+-- current replayed_steps=12: per forwarded request (tokens): total / common-prefix-with-prev / cache-read / billed-equiv
+   req 1  T=  2902  common=     0  read=     0  billed=  3628
+   req 2  T=  3554  common=   346  read=   147  billed=  4273
+   req 3  T=  4245  common=   998  read=   147  billed=  5137
+   req 4  T=  3575  common=  1651  read=   147  billed=  4299
+-- first-sight replayed_steps=12: per forwarded request (tokens): total / common-prefix-with-prev / cache-read / billed-equiv
+   req 1  T=  2902  common=     0  read=     0  billed=  3628
+   req 2  T=  5707  common=  2902  read=  2902  billed=  3797
+   req 3  T=  8551  common=  5707  read=  5707  billed=  4126
+   req 4  T=  8611  common=  8551  read=  8551  billed=   929
+
+   policy       reqs  sum input tok  cache read  billed-equiv  vs off (raw)  vs off (billed)
+   off             4         32,253      21,477        15,618         +0.0%            +0.0%
+   current         4         14,276         441        17,337        -55.7%           +11.0%
+   chunk-3         4         15,722         441        19,146        -51.3%           +22.6%
+   chunk-5         4         17,898       5,268        16,316        -44.5%            +4.5%
+   current+bp      4         14,276       2,869        14,546        -55.7%            -6.9%
+   chunk-3+bp      4         15,722       2,503        16,775        -51.3%            +7.4%
+   first-sight     4         25,771      17,160        12,480        -20.1%           -20.1%

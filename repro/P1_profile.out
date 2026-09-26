@@ -1,0 +1,105 @@
+
+=== runs=100 steps=712 edges=8 nodes=59 hot=48  build=258 ms (best of 3)
+   load_runs                  99.5 ms  (38.6%)  calls=1
+   find_rule                  45.0 ms  (17.5%)  calls=58
+   _usage_by_call             10.9 ms  ( 4.2%)  calls=1
+   call_slots                  9.8 ms  ( 3.8%)  calls=712
+   anti_unify                  9.8 ms  ( 3.8%)  calls=8
+   obs_features                9.3 ms  ( 3.6%)  calls=712
+   is_commit_point             6.0 ms  ( 2.3%)  calls=65
+   is_readonly                 2.8 ms  ( 1.1%)  calls=65
+   contexts                    2.1 ms  ( 0.8%)  calls=812
+   sql_write(tx)               1.1 ms  ( 0.4%)  calls=0
+   guard_of                    0.6 ms  ( 0.2%)  calls=64
+   postcondition               0.5 ms  ( 0.2%)  calls=65
+   excess_negatives            0.1 ms  ( 0.1%)  calls=65
+
+=== runs=300 steps=2106 edges=8 nodes=59 hot=55  build=425 ms (best of 3)
+   load_runs                  77.8 ms  (18.3%)  calls=1
+   find_rule                  56.9 ms  (13.4%)  calls=58
+   anti_unify                 30.1 ms  ( 7.1%)  calls=8
+   call_slots                 29.1 ms  ( 6.8%)  calls=2106
+   obs_features               25.8 ms  ( 6.1%)  calls=2106
+   _usage_by_call             11.6 ms  ( 2.7%)  calls=1
+   contexts                    7.4 ms  ( 1.7%)  calls=2406
+   is_commit_point             5.6 ms  ( 1.3%)  calls=65
+   is_readonly                 2.3 ms  ( 0.5%)  calls=65
+   sql_write(tx)               1.1 ms  ( 0.2%)  calls=0
+   guard_of                    0.7 ms  ( 0.2%)  calls=64
+   postcondition               0.6 ms  ( 0.1%)  calls=65
+   excess_negatives            0.1 ms  ( 0.0%)  calls=65
+         1450710 function calls (1450127 primitive calls) in 1.002 seconds
+   Ordered by: internal time
+   List reduced from 273 to 18 due to restriction <18>
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+    23752    0.105    0.000    0.132    0.000 /home/user/treejit/src/treejit/shellwords.py:93(_read_word)
+        1    0.054    0.054    1.025    1.025 /home/user/treejit/src/treejit/builder.py:105(build_family)
+        6    0.050    0.008    0.050    0.008 {method 'fetchall' of 'sqlite3.Cursor' objects}
+     6456    0.048    0.000    0.205    0.000 /home/user/treejit/src/treejit/shellwords.py:34(tokenize)
+    14286    0.040    0.000    0.040    0.000 /usr/lib/python3.11/json/encoder.py:205(iterencode)
+     7857    0.034    0.000    0.111    0.000 /home/user/treejit/src/treejit/util.py:18(h)
+     5375    0.031    0.000    0.031    0.000 {method 'search' of 're.Pattern' objects}
+       12    0.026    0.002    0.026    0.002 {method 'execute' of 'sqlite3.Connection' objects}
+     1319    0.023    0.000    0.023    0.000 /home/user/treejit/src/treejit/bindings.py:93(<listcomp>)
+   246780    0.023    0.000    0.023    0.000 {method 'append' of 'list' objects}
+    14302    0.021    0.000    0.094    0.000 /usr/lib/python3.11/json/__init__.py:183(dumps)
+    14302    0.020    0.000    0.065    0.000 /usr/lib/python3.11/json/encoder.py:183(encode)
+     3168    0.016    0.000    0.143    0.000 /home/user/treejit/src/treejit/shellwords.py:353(command_heads)
+        1    0.016    0.016    0.097    0.097 /home/user/treejit/src/treejit/builder.py:72(load_runs)
+     3168    0.015    0.000    0.019    0.000 /home/user/treejit/src/treejit/templates.py:66(greedy_gaps)
+     7010    0.015    0.000    0.587    0.000 /tmp/claude-0/-home-user-treejit/c5df906a-8ec8-5510-ba88-9023b102b6be/scratchpad/repro/P1_profile.py:24(g)
+   168965    0.014    0.000    0.014    0.000 {method 'isspace' of 'str' objects}
+     2106    0.014    0.000    0.089    0.000 /home/user/treejit/src/treejit/templates.py:146(call_slots)
+
+=== runs=1000 steps=6946 edges=8 nodes=59 hot=55  build=1079 ms (best of 3)
+   load_runs                 179.8 ms  (14.2%)  calls=1
+   anti_unify                122.2 ms  ( 9.7%)  calls=8
+   call_slots                108.9 ms  ( 8.6%)  calls=6946
+   obs_features               96.2 ms  ( 7.6%)  calls=6946
+   find_rule                  81.2 ms  ( 6.4%)  calls=58
+   _usage_by_call             18.9 ms  ( 1.5%)  calls=1
+   contexts                   18.3 ms  ( 1.4%)  calls=7946
+   is_commit_point             6.6 ms  ( 0.5%)  calls=65
+   is_readonly                 2.4 ms  ( 0.2%)  calls=65
+   sql_write(tx)               1.1 ms  ( 0.1%)  calls=0
+   guard_of                    0.9 ms  ( 0.1%)  calls=64
+   postcondition               0.8 ms  ( 0.1%)  calls=65
+   excess_negatives            0.2 ms  ( 0.0%)  calls=65
+
+=== runs=2000 steps=13883 edges=8 nodes=74 hot=65  build=2296 ms (best of 3)
+   anti_unify                272.3 ms  (11.5%)  calls=8
+   load_runs                 216.3 ms  ( 9.1%)  calls=1
+   obs_features              212.6 ms  ( 9.0%)  calls=13883
+   call_slots                209.4 ms  ( 8.8%)  calls=13883
+   find_rule                  96.4 ms  ( 4.1%)  calls=76
+   contexts                   45.6 ms  ( 1.9%)  calls=15882
+   learn_decision_list        27.3 ms  ( 1.2%)  calls=15
+   _usage_by_call             16.8 ms  ( 0.7%)  calls=1
+   is_commit_point             8.2 ms  ( 0.3%)  calls=84
+   is_readonly                 3.1 ms  ( 0.1%)  calls=84
+   sql_write(tx)               1.3 ms  ( 0.1%)  calls=0
+   guard_of                    1.1 ms  ( 0.0%)  calls=73
+   postcondition               1.1 ms  ( 0.0%)  calls=109
+   excess_negatives            0.2 ms  ( 0.0%)  calls=84
+         7890359 function calls (7889606 primitive calls) in 5.516 seconds
+   Ordered by: internal time
+   List reduced from 282 to 18 due to restriction <18>
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+   154746    0.772    0.000    0.961    0.000 /home/user/treejit/src/treejit/shellwords.py:93(_read_word)
+        1    0.362    0.362    5.673    5.673 /home/user/treejit/src/treejit/builder.py:105(build_family)
+    42138    0.353    0.000    1.496    0.000 /home/user/treejit/src/treejit/shellwords.py:34(tokenize)
+    87547    0.349    0.000    0.349    0.000 /usr/lib/python3.11/json/encoder.py:205(iterencode)
+    51573    0.230    0.000    0.864    0.000 /home/user/treejit/src/treejit/util.py:18(h)
+  1527649    0.150    0.000    0.150    0.000 {method 'append' of 'list' objects}
+    29548    0.147    0.000    0.147    0.000 {method 'search' of 're.Pattern' objects}
+    88273    0.144    0.000    0.721    0.000 /usr/lib/python3.11/json/__init__.py:183(dumps)
+    88273    0.133    0.000    0.515    0.000 /usr/lib/python3.11/json/encoder.py:183(encode)
+    20992    0.113    0.000    0.995    0.000 /home/user/treejit/src/treejit/shellwords.py:353(command_heads)
+    20992    0.107    0.000    0.129    0.000 /home/user/treejit/src/treejit/templates.py:66(greedy_gaps)
+    13883    0.103    0.000    0.669    0.000 /home/user/treejit/src/treejit/templates.py:146(call_slots)
+  1093669    0.094    0.000    0.094    0.000 {method 'isspace' of 'str' objects}
+    44183    0.093    0.000    2.634    0.000 /tmp/claude-0/-home-user-treejit/c5df906a-8ec8-5510-ba88-9023b102b6be/scratchpad/repro/P1_profile.py:24(g)
+    10496    0.090    0.000    0.182    0.000 /home/user/treejit/src/treejit/templates.py:124(match_sh)
+    27766    0.081    0.000    1.391    0.000 /home/user/treejit/src/treejit/templates.py:47(shape_of)
+        6    0.077    0.013    0.077    0.013 {method 'fetchall' of 'sqlite3.Cursor' objects}
+   570932    0.074    0.000    0.074    0.000 {built-in method builtins.isinstance}

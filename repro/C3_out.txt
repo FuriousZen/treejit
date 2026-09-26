@@ -1,0 +1,18 @@
+db=C2_out_s0/treejit+ok+compact.db
+runs=200 compaction rows=71 (0.35/run) digest bytes=19891 (~360 B/row incl. id+hash)
+  after run  50: 15 rows
+  after run 100: 38 rows
+  after run 150: 55 rows
+  after run 200: 71 rows
+rows belonging to runs with an outcome: 71/71; rows with no step row: 0
+treejit prune --days 0 --min-hits 1e6 -> evicted 80 node(s) (idle > 0.0d, hits < 1000000)
+compaction rows before/after prune: 71/71
+db=C3_out_allow/treejit+compact.db
+runs=200 compaction rows=19 (0.10/run) digest bytes=4308 (~307 B/row incl. id+hash)
+  after run  50: 3 rows
+  after run 100: 12 rows
+  after run 150: 15 rows
+  after run 200: 19 rows
+rows belonging to runs with an outcome: 19/19; rows with no step row: 0
+treejit prune --days 0 --min-hits 1e6 -> evicted 84 node(s) (idle > 0.0d, hits < 1000000)
+compaction rows before/after prune: 19/19

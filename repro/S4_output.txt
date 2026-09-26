@@ -1,0 +1,26 @@
+git status                                   core.fsmonitor             ro=1 executed=fsmonitor
+git status --short                           core.fsmonitor             ro=1 executed=fsmonitor
+git diff                                     core.fsmonitor             ro=1 executed=fsmonitor
+git ls-files -m                              core.fsmonitor             ro=1 executed=fsmonitor
+git diff                                     diff.external              ro=1 executed=diff.external
+git log -p -1                                diff.external              ro=1 executed=
+git diff                                     diff.evil.textconv         ro=1 executed=textconv
+git show HEAD                                diff.evil.textconv         ro=1 executed=textconv
+git blame s.dat                              diff.evil.textconv         ro=1 executed=textconv
+git status                                   filter.evil.clean          ro=1 executed=
+git diff --stat                              filter.evil.clean          ro=1 executed=filter.clean
+git -p log -1                                core.pager                 ro=1 executed=
+git --paginate status                        core.pager                 ro=1 executed=
+git -p log -1                                pager.log                  ro=1 executed=
+git log --show-signature -1                  gpg.program                ro=1 executed=
+git log -1                                   log.showSignature          ro=1 executed=
+cd vendor/pkg && git status                  (embedded bare repo)       ro=1 executed=bare-fsmonitor 
+  same, with -c safe.bareRepository=explicit                            executed=
+--- with hardening: git -c core.fsmonitor=false -c core.pager=cat -c diff.external= -c log.showSignature=false --no-pager ...
+git -c core.fsmonitor=false -c core.pager=cat -c diff.external= -c log.showSignature=false -c gpg.program=false --no-pager status core.fsmonitor             ro=0 executed=
+git -c core.fsmonitor=false -c core.pager=cat -c diff.external= -c log.showSignature=false -c gpg.program=false --no-pager diff diff.external              ro=0 executed=
+git -c core.fsmonitor=false -c core.pager=cat -c diff.external= -c log.showSignature=false -c gpg.program=false --no-pager diff --no-textconv diff.evil.textconv         ro=0 executed=
+git -c core.fsmonitor=false -c core.pager=cat -c diff.external= -c log.showSignature=false -c gpg.program=false --no-pager diff --stat filter.evil.clean          ro=0 executed=filter.clean
+git -c core.fsmonitor=false -c core.pager=cat -c diff.external= -c log.showSignature=false -c gpg.program=false --no-pager show HEAD~1 diff.evil.textconv         ro=0 executed=textconv
+--- env-based: GIT_CONFIG_GLOBAL=/dev/null does not disable repo config; GIT_CONFIG_COUNT injection:
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false git status core.fsmonitor             ro=0 executed=

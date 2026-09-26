@@ -1,0 +1,4 @@
+messages.create: ok
+messages.stream: AttributeError '_Ns' object has no attribute 'stream'
+messages.count_tokens: AttributeError '_Ns' object has no attribute 'count_tokens'
+messages.batches: AttributeError '_Ns' object has no attribute 'batches'

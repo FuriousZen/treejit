@@ -1,0 +1,5 @@
+model routes: {'/v1/messages': 'anthropic', '/v1/chat/completions': 'openai', '/chat/completions': 'openai'}
+'/v1/responses' in ROUTES: False | dialects: ['anthropic', 'openai']
+is_readonly signature: (tool: 'str', args: 'dict', cfg: 'Config') -> 'bool'
+  shell {'command': 'git status'} -> read-only=True
+  shell {'command': ['bash', '-lc', 'git status']} -> read-only=False

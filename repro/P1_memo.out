@@ -1,0 +1,3 @@
+runs=  300: stock    405 ms | memoized tokenize/shape_of/node_id (warm)    287 ms
+runs= 1000: stock   1088 ms | memoized tokenize/shape_of/node_id (warm)    602 ms
+runs= 2000: stock   1986 ms | memoized tokenize/shape_of/node_id (warm)   1229 ms

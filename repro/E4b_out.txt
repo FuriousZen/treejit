@@ -1,0 +1,22 @@
+small calls made: 8
+{'id': 10, 'run_id': None, 'tier': 'T2', 'note': 'ambiguous@r0: Bash(ls); failed:chose_new', 'tok': 320}
+{'id': 14, 'run_id': None, 'tier': 'T2', 'note': 'ambiguous@r0: Bash(date) | Bash(ls); failed:chose_new', 'tok': 320}
+{'id': 18, 'run_id': None, 'tier': 'T2', 'note': 'ambiguous@r0: Bash(ls) | Bash(date); failed:chose_new', 'tok': 320}
+{'id': 22, 'run_id': None, 'tier': 'T2', 'note': 'ambiguous@r0: Bash(date) | Bash(ls); failed:chose_new', 'tok': 320}
+{'id': 26, 'run_id': None, 'tier': 'T2', 'note': 'ambiguous@r0: Bash(ls) | Bash(date); failed:chose_new', 'tok': 320}
+{'id': 30, 'run_id': None, 'tier': 'T2', 'note': 'ambiguous@r0: Bash(date) | Bash(ls); failed:chose_new', 'tok': 320}
+{'id': 34, 'run_id': None, 'tier': 'T2', 'note': 'ambiguous@r0: Bash(ls) | Bash(date); failed:chose_new', 'tok': 320}
+{'id': 44, 'run_id': None, 'tier': 'T2', 'note': 'ambiguous@r0: Bash(date) | Bash(ls); failed:chose_new', 'tok': 320}
+run r_16d6e7c51274cb6e  family=fb58c52e  outcome=pass
+task: 'gamma task99'
+2 tool calls, 0 replayed; 3 model call(s), 3150 tokens; requests by tier: T4=3
+
+  #0  model    Bash(whoami) tok=1050
+        why: T2_failed:chose_new
+        obs: ok
+  #1  model    Bash(pwd) tok=1050
+        why: off_tree
+        obs: ok
+   -  model    (no tool call: final answer) tok=1050
+        why: ambiguous@g1
+tokens in requests table: 35110  sum over explain of all runs: 32550

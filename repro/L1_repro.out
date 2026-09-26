@@ -1,0 +1,10 @@
+rules on task~src -> git rm: [{'edge': 'b09e832a550c', 'n': 5, 'pred': ['task', 'src'], 'purity': 1.0, 'support': 5}, {'edge': 'b09e832a550c', 'n': 5, 'pred': ['task', 'src'], 'purity': 1.0, 'support': 5}]
+calls: [('Bash', {'command': 'git status'}), ('Bash', {'command': 'git rm src/net/c1.py'})]
+replayed ids: ['toolu_tj_35590d5b46c0_e3Ja15OcgAeG', 'toolu_tj_60c588e3ea6f_dbc0s25z7oyu']
+small calls for the novel input: 0
+src/net/c1.py still exists: False
+   T0 T0@r0 Bash(git status) conf=0.89
+   T1 T1@r1 Bash(git rm $0) conf=0.86
+   T4 end@r2
+L1 REPRODUCED
+rules after 1 failure: []

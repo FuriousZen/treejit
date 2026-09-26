@@ -1,0 +1,16 @@
+300 tasks in 149s; success 300/300; replayed share 98%
+outcome #    1 runs=    1     21.0 ms
+outcome #   21 runs=   21    234.6 ms
+outcome #   41 runs=   41    245.3 ms
+outcome #   61 runs=   61    179.6 ms
+outcome #   81 runs=   81    278.3 ms
+outcome #  101 runs=  101    496.4 ms
+outcome #  121 runs=  121    540.6 ms
+outcome #  141 runs=  141    587.5 ms
+outcome #  161 runs=  161    605.5 ms
+outcome #  181 runs=  181    613.7 ms
+outcome #  201 runs=  201    768.0 ms
+outcome #  221 runs=  221    835.8 ms
+outcome #  241 runs=  241    950.3 ms
+outcome #  261 runs=  261    325.3 ms
+outcome #  281 runs=  281    356.2 ms

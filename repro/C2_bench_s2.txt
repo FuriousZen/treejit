@@ -1,0 +1,12 @@
+treejit+ok                 200 tasks in 58.9s
+treejit+ok+compact         200 tasks in 55.9s
+
+mode                       window    calls/task small/task  tokens/task  replayed  success side exits  compacted/task
+treejit+ok                 1-10            3.60       0.20        4,000       42%     100%          0               0
+treejit+ok                 41-50           1.00       0.40        1,526      100%     100%          0               0
+treejit+ok                 151-200         1.00       0.78        1,931      100%     100%          0               0
+treejit+ok+compact         1-10            3.60       0.20        4,000       42%     100%          0               0
+treejit+ok+compact         41-50           1.00       0.40        1,435      100%     100%          0             332
+treejit+ok+compact         151-200         1.00       0.78        1,734      100%     100%          0             704
+
+wrote C2_out_s2/results.csv, summary.json, learning_curve.html

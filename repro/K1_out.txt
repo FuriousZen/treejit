@@ -1,0 +1,11 @@
+== current families.resolve ==
+  A (<env> near top, system 20269 chars) x5 sessions: families=[0, 1, 2, 3, 4]  learned prefix chars=[20269, 20270, 20269, 20270, 20269]
+  B (<env> at 60%) x5 sessions: families=[0, 0, 0, 0, 0]  learned prefix chars=[12082]
+  C agent1 x3 then agent2 x3: families=[0, 0, 0, 0, 0, 0]  learned prefix chars=[349]
+   -> agent 2 (a different system prompt) JOINED agent 1's family
+
+== prototype: masked line-set keying ==
+  A: families=[0, 0, 0, 0, 0]
+  B: families=[0, 0, 0, 0, 0]
+  C agent1 x3 then agent2 x3: families=[0, 0, 0, 1, 1, 1]
+  D Claude Code vs a custom agent that appends 30% extra lines: families=[0, 0, 0, 1, 1, 1]

@@ -1,0 +1,17 @@
+2000 tasks in 191s; success 1999/2000; replayed share 99%
+outcome #   25 runs=   25    233.8 ms
+outcome #  150 runs=  150    487.6 ms
+outcome #  275 runs=  275    718.0 ms
+outcome #  400 runs=  400    865.3 ms
+outcome #  525 runs=  525   1537.7 ms
+outcome #  650 runs=  650   1964.4 ms
+outcome #  775 runs=  775   2171.7 ms
+outcome #  900 runs=  900   2526.7 ms
+outcome # 1025 runs= 1025   2790.9 ms
+outcome # 1150 runs= 1150   2380.9 ms
+outcome # 1275 runs= 1275   3366.7 ms
+outcome # 1400 runs= 1400   1647.3 ms
+outcome # 1525 runs= 1525   2161.9 ms
+outcome # 1650 runs= 1650   1846.6 ms
+outcome # 1775 runs= 1775   2089.5 ms
+outcome # 1900 runs= 1900   2253.4 ms

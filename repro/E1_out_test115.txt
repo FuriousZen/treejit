@@ -1,0 +1,6 @@
+baseline     n=115  full/task= 7.75 small/task=0.00 tok/task=  41,615 served=   0% reward=0.90 slip_tasks=13 fail_without_slip=[] (39.2s)
+  last baseline     n=40   full/task= 7.45 small/task=0.00 tok/task=  39,427 served=   0% reward=0.88 slip_tasks=5 fail_without_slip=[]
+treejit      n=115  full/task= 4.15 small/task=3.33 tok/task=  28,235 served=  55% reward=0.90 slip_tasks=13 fail_without_slip=[] (324.4s)
+  last treejit      n=40   full/task= 4.20 small/task=3.08 tok/task=  27,763 served=  52% reward=0.88 slip_tasks=5 fail_without_slip=[]
+treejit+ok   n=115  full/task= 3.81 small/task=3.78 tok/task=  27,056 served=  60% reward=0.90 slip_tasks=13 fail_without_slip=[] (325.9s)
+  last treejit+ok   n=40   full/task= 3.45 small/task=3.88 tok/task=  24,732 served=  63% reward=0.88 slip_tasks=5 fail_without_slip=[]

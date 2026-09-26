@@ -1,0 +1,28 @@
+treejit                    200 tasks in 23.3s
+treejit+ok                 200 tasks in 16.6s
+
+mode                       window    calls/task small/task  tokens/task  replayed  success side exits  compacted/task
+treejit                    1-10            4.20       0.10        4,686       35%     100%          1               0
+treejit                    41-50           4.90       0.00        6,565       37%     100%          0               0
+treejit                    151-200         3.70       0.14        4,820       48%     100%          0               0
+treejit+ok                 1-10            4.10       0.10        4,611       38%     100%          2               0
+treejit+ok                 41-50           1.10       0.80        2,169       98%     100%          0               0
+treejit+ok                 151-200         1.06       0.90        2,038       99%     100%          0               0
+
+wrote /tmp/claude-0/-home-user-treejit/c5df906a-8ec8-5510-ba88-9023b102b6be/scratchpad/repro/S1_bench_old/results.csv, summary.json, learning_curve.html
+treejit {'mid': {'calls_per_task': 4.9, 'tokens_per_task': 6564.9, 'served_pct': 37.097, 'success_pct': 100.0}, 'last': {'calls_per_task': 3.7, 'tokens_per_task': 4820.36, 'served_pct': 48.473, 'success_pct': 100.0}}
+treejit+ok {'mid': {'calls_per_task': 1.1, 'tokens_per_task': 2168.8, 'served_pct': 98.387, 'success_pct': 100.0}, 'last': {'calls_per_task': 1.06, 'tokens_per_task': 2037.66, 'served_pct': 98.855, 'success_pct': 100.0}}
+treejit                    200 tasks in 22.7s
+treejit+ok                 200 tasks in 16.0s
+
+mode                       window    calls/task small/task  tokens/task  replayed  success side exits  compacted/task
+treejit                    1-10            4.20       0.10        4,686       35%     100%          1               0
+treejit                    41-50           4.90       0.00        6,565       37%     100%          0               0
+treejit                    151-200         3.70       0.14        4,820       48%     100%          0               0
+treejit+ok                 1-10            4.10       0.10        4,611       38%     100%          2               0
+treejit+ok                 41-50           1.10       0.80        2,169       98%     100%          0               0
+treejit+ok                 151-200         1.06       0.90        2,038       99%     100%          0               0
+
+wrote /tmp/claude-0/-home-user-treejit/c5df906a-8ec8-5510-ba88-9023b102b6be/scratchpad/repro/S1_bench_proto/results.csv, summary.json, learning_curve.html
+treejit {'mid': {'calls_per_task': 4.9, 'tokens_per_task': 6564.9, 'served_pct': 37.097, 'success_pct': 100.0}, 'last': {'calls_per_task': 3.7, 'tokens_per_task': 4820.36, 'served_pct': 48.473, 'success_pct': 100.0}}
+treejit+ok {'mid': {'calls_per_task': 1.1, 'tokens_per_task': 2168.8, 'served_pct': 98.387, 'success_pct': 100.0}, 'last': {'calls_per_task': 1.06, 'tokens_per_task': 2037.66, 'served_pct': 98.855, 'success_pct': 100.0}}

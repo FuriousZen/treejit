@@ -1,0 +1,24 @@
+== 1. same task, two conversations (model-chosen first call) ==
+   ('r_bcf9283993eb3e4a', 'fix the readme', 2, None)
+   ('r_e62bd9719965ccc3', 'fix the readme', 2, None)
+  -> two runs (distinct model tool ids). A harness that *resumes* a conversation keeps its history, so the id is stable;
+     a fresh conversation with the same task is a new run (by design or not).
+
+== 2. identical task, first call REPLAYED in both conversations ==
+   first ids: toolu_tj_35590d5b46c0_cchX56L1duCy  toolu_tj_35590d5b46c0_ccJ84x4GiGp1
+   runs: [('r_dbd76b37ed144e5c', 'fix the readme', 2, None), ('r_2db797acb43fff2c', 'fix the readme', 2, None)]
+  -> no collision: replayed ids carry rand_id(10) (62^10 space)
+
+== 3. OpenAI-compatible backend with deterministic tool-call ids (e.g. 'call_0', common in local servers) ==
+   runs: [('r_927cc06286d7af0a', 'task A: inspect the repo', 2, 'pass')]
+   steps of r_927cc06286d7af0a : [(0, '{"command":"ls"}'), (1, '{"command":"rm -rf build"}')]
+  -> all three conversations share ONE run id; a later conversation inherits the first one's 'pass'
+
+== 4. Claude-Code-like session: 2 prompts, an interrupt text message mid-episode, then /compact ==
+   ('r_76fcca832f938b4b', 'prompt 1: add a flag', 2, None)
+   ('r_6720f8148cfde898', '[Request interrupted by user] ', 1, None)
+   ('r_ef2a05e2f506ea9a', 'prompt 2: now write tests', 1, None)
+   ('r_45f3170de99a4163', 'This session is being continue', 1, None)
+  -> 4 runs for one session: the interrupt split prompt 1's work into two runs (the first 3 steps never
+     get an outcome if the Stop hook posts 'latest'), and /compact restarts the root path under a new 'task'.
+   metadata/headers treejit ignores: body.metadata.user_id (Claude Code puts a session id there), x-claude-code-session-id

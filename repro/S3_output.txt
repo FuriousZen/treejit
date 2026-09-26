@@ -1,0 +1,54 @@
+command                                          ro commit want verdict
+git stash push                                    0      1    0 FALSE POSITIVE
+git stash push -m wip src/x.py                    0      1    0 FALSE POSITIVE
+git checkout push                                 0      1    0 FALSE POSITIVE
+git branch -D push                                0      1    0 FALSE POSITIVE
+git fetch origin push                             0      1    0 FALSE POSITIVE
+git log origin/push                               1      0    0 ok
+git worktree add ../push                          0      0    0 ok
+git rebase origin/push                            0      0    0 ok
+git push --dry-run                                0      1    0 FALSE POSITIVE
+git push -n origin main                           0      1    0 FALSE POSITIVE
+apt install curl                                  0      1    0 FALSE POSITIVE
+apt-get install -y curl wget                      0      1    0 FALSE POSITIVE
+pip install requests curl                         0      1    0 FALSE POSITIVE
+brew install rsync                                0      1    0 FALSE POSITIVE
+npm install ssh2 && npm run build                 0      0    0 ok
+man ssh                                           0      1    0 FALSE POSITIVE
+mkdir ssh                                         0      1    0 FALSE POSITIVE
+rm -rf wget                                       0      1    0 FALSE POSITIVE
+chmod 700 ssh                                     0      1    0 FALSE POSITIVE
+echo push > f                                     0      0    0 ok
+echo 'git push' > NOTES                           0      0    0 ok
+npm run push-docs                                 0      0    0 ok
+sed -i 's/curl/wget/' Dockerfile                  0      0    0 ok
+curl -s localhost:8000/health                     0      1    0 FALSE POSITIVE
+curl -sSf http://127.0.0.1:3000/ -o /dev/null     0      1    0 FALSE POSITIVE
+wget -qO- http://localhost:8080                   0      1    0 FALSE POSITIVE
+rsync -a src/ build/                              0      1    0 FALSE POSITIVE
+gh pr view 12                                     0      1    0 FALSE POSITIVE
+gh pr list                                        0      1    0 FALSE POSITIVE
+gh pr diff 12                                     0      1    0 FALSE POSITIVE
+gh pr checks 12                                   0      1    0 FALSE POSITIVE
+gh release list                                   0      1    0 FALSE POSITIVE
+gh release view v1                                0      1    0 FALSE POSITIVE
+kubectl apply --dry-run=client -f x.yaml          0      1    0 FALSE POSITIVE
+npm publish --dry-run                             0      1    0 FALSE POSITIVE
+cargo publish --dry-run                           0      1    0 FALSE POSITIVE
+docker compose push                               0      1    1 ok
+git push origin main                              0      1    1 ok
+docker push img:1                                 0      1    1 ok
+gh pr create -f                                   0      1    1 ok
+gh pr merge 3                                     0      1    1 ok
+curl -X POST https://api.x/y                      0      1    1 ok
+ssh prod 'systemctl restart app'                  0      1    1 ok
+scp dist.tgz prod:/srv                            0      1    1 ok
+kubectl delete pod x                              0      1    1 ok
+python -m pytest -q                               0      0    0 ok
+pytest -q                                         0      0    0 ok
+npm test                                          0      0    0 ok
+cargo test                                        0      0    0 ok
+go test ./...                                     0      0    0 ok
+make test                                         0      0    0 ok
+
+51 commands: 28 false positives, 0 false negatives

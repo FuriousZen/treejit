@@ -1,0 +1,6 @@
+E4_treejit+ok_s0.db: late runs=40 T4 with tool call/run=0.05 T4 final answer/run=1.00
+   after a tool-producing T4: mean replayed tail=1.00 steps; tail served via g-context 2 vs root path 0; tails ended by {'stop:T4': 2}
+E1_treejit+ok_test.db: late runs=58 T4 with tool call/run=2.19 T4 final answer/run=1.00
+   after a tool-producing T4: mean replayed tail=0.08 steps; tail served via g-context 4 vs root path 6; tails ended by {'stop:T2': 30, 'stop:T4': 89, 'stop:T3': 8}
+E1_treejit+ok_train.db: late runs=150 T4 with tool call/run=3.00 T4 final answer/run=1.00
+   after a tool-producing T4: mean replayed tail=0.04 steps; tail served via g-context 1 vs root path 15; tails ended by {'stop:T3': 76, 'stop:T2': 116, 'stop:T4': 258}

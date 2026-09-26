@@ -1,0 +1,33 @@
+
+=== pattern: dense  (system chars=62892) ===
+
+   policy       reqs  sum input tok  cache read  billed-equiv  vs off (raw)  vs off (billed)
+   off            15        350,188     320,729        68,898         +0.0%            +0.0%
+   current        15        294,171     232,172       100,719        -16.0%           +46.2%
+   chunk-3        15        302,796     261,887        77,326        -13.5%           +12.2%
+   chunk-5        15        310,714     275,525        71,540        -11.3%            +3.8%
+   current+bp     15        294,171     242,050        89,358        -16.0%           +29.7%
+   chunk-3+bp     15        302,796     264,581        74,228        -13.5%            +7.7%
+   first-sight    15        350,188     320,729        68,898         +0.0%            +0.0%
+
+=== pattern: interleaved  (system chars=62892) ===
+
+   policy       reqs  sum input tok  cache read  billed-equiv  vs off (raw)  vs off (billed)
+   off             8        164,146     140,361        43,768         +0.0%            +0.0%
+   current         8        149,063     115,653        53,330         -9.2%           +21.8%
+   chunk-3         8        150,498     119,873        50,270         -8.3%           +14.9%
+   chunk-5         8        152,662     125,458        46,553         -7.0%            +6.4%
+   current+bp      8        149,063     118,509        50,045         -9.2%           +14.3%
+   chunk-3+bp      8        150,498     121,794        48,061         -8.3%            +9.8%
+   first-sight     8        164,146     140,361        43,768         +0.0%            +0.0%
+
+=== pattern: bursty  (system chars=62892) ===
+
+   policy       reqs  sum input tok  cache read  billed-equiv  vs off (raw)  vs off (billed)
+   off             4         97,253      70,227        40,805         +0.0%            +0.0%
+   current         4         79,276      49,191        42,525        -18.5%            +4.2%
+   chunk-3         4         80,722      49,191        44,334        -17.0%            +8.6%
+   chunk-5         4         82,898      54,018        41,503        -14.8%            +1.7%
+   current+bp      4         79,276      51,619        39,733        -18.5%            -2.6%
+   chunk-3+bp      4         80,722      51,253        41,962        -17.0%            +2.8%
+   first-sight     4         90,771      65,910        37,667         -6.7%            -7.7%
