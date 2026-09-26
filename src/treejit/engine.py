@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import dialects, families, subcalls
+from . import compaction, dialects, families, subcalls
 from .builder import build_family
 from .config import Config
 from .dialects import Dialect
@@ -180,13 +180,19 @@ class TreeJIT:
     def _forward(self, d: Dialect, req: NormRequest, view: TreeView, plan: Plan, fam: str, task: str, task_hash: str,
                  run_id: str | None, t0: float) -> Result:
         fwd = d.prepare_forward(req)
+        comp = compaction.apply(self.store, view, self.cfg, req, fwd) if self.cfg.compact else None
+        if comp is not None:
+            fwd = comp.body
         hint = hints(view, self.cfg, plan.node)
         if hint:
             fwd = d.inject_hint(fwd, hint)
         if plan.node:
             self.store.hit(plan.node)
         note = plan.reason + ("; " + "; ".join(plan.detail) if plan.detail else "") + ("; hints" if hint else "")
-        rid = self.store.log_request(family=fam, run_id=run_id, dialect=d.name, tier="T4", node=plan.node, note=note[:500])
+        if comp is not None and comp.n:
+            note += "; " + comp.note
+        rid = self.store.log_request(family=fam, run_id=run_id, dialect=d.name, tier="T4", node=plan.node, note=note[:500],
+                                     compacted_chars=comp.chars if comp is not None else 0)
         return Result("forward", fwd, req.stream, None, run_id, "T4", plan, self._headers(run_id, "T4"),
                       _Pending(rid, fam, task, task_hash, run_id, t0))
 

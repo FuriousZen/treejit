@@ -73,6 +73,9 @@ class CodingEnv:
     tests_since_change: bool = True
     tests_ok_since_change: bool = True
     pytest_runs: int = 0
+    untracked: list = field(default_factory=list)
+    n_tests: int = 42
+    warnings: list = field(default_factory=list)
 
     def run(self, name: str, args: dict) -> tuple[str, bool]:
         if name == "Read":
@@ -115,8 +118,12 @@ class CodingEnv:
             lines = [f" M {p}" for p in sorted(self.modified - self.staged)] + [f"M  {p}" for p in sorted(self.staged - self.deleted)] \
                 + [f"D  {p}" for p in sorted(self.deleted)]
             if "--short" in w or "-s" in w:
-                return "\n".join(lines), False
-            body = "\n".join(lines) if lines else "nothing to commit, working tree clean"
+                return "\n".join(lines + [f"?? {p}" for p in self.untracked]), False
+            body = "\n".join(lines) if lines else ("" if self.untracked else "nothing to commit, working tree clean")
+            if self.untracked:
+                body += ("\n" if body else "") + "Untracked files:\n  (use \"git add <file>...\" to include in what will be committed)\n" \
+                    + "\n".join(f"\t{p}" for p in self.untracked) \
+                    + "\n\nnothing added to commit but untracked files present (use \"git add\" to track)"
             return "On branch main\nYour branch is up to date with 'origin/main'.\n" + body, False
         if w[:2] == ["git", "add"]:
             for p in w[2:]:
@@ -155,16 +162,20 @@ class CodingEnv:
             self.pytest_runs += 1
             self.tests_since_change = True
             broken = self.kind == "typo" and self.typo[0] in self.files.get(self.target, "")
+            n_all = self.n_tests
             if self.flaky and "--lf" not in w and self.pytest_runs == 1:
                 self.tests_ok_since_change = False
-                return ("F" + "." * 41 + "\nFAILED tests/test_net.py::test_timeout - TimeoutError: timed out after 5s\n"
-                        "1 failed, 41 passed in 3.12s\nExit code 1"), True
+                return (_progress("F" + "." * (n_all - 1)) + "\nFAILED tests/test_net.py::test_timeout - TimeoutError: timed out after 5s\n"
+                        f"1 failed, {n_all - 1} passed in 3.12s\nExit code 1"), True
             if broken:
                 self.tests_ok_since_change = False
-                return f"FAILED tests/test_spelling.py::test_no_typos - AssertionError: '{self.typo[0]}'\n1 failed, 41 passed in 2.9s\nExit code 1", True
+                return (_progress("." * (n_all - 1) + "F") + f"\nFAILED tests/test_spelling.py::test_no_typos - AssertionError: '{self.typo[0]}'\n"
+                        f"1 failed, {n_all - 1} passed in 2.9s\nExit code 1"), True
             self.tests_ok_since_change = True
-            n = 1 if "--lf" in w else 42
-            return f"{'.' * n}\n{n} passed in {1.1 + n / 40:.2f}s", False
+            n = 1 if "--lf" in w else n_all
+            warn = "" if n == 1 or not self.warnings else _warnings_summary(self.warnings)
+            tail = f"{n} passed, {len(self.warnings)} warnings in {1.1 + n / 40:.2f}s" if warn else f"{n} passed in {1.1 + n / 40:.2f}s"
+            return f"{_progress('.' * n)}{warn}\n{tail}", False
         if w[0] in ("ls", "cat"):
             return "\n".join(sorted(self.files)), False
         return f"bash: {w[0]}: command not found\nExit code 127", True
@@ -177,6 +188,8 @@ class CodingEnv:
         if not all(ok for *_, ok in self.commits):
             return False, "pushed without a passing test run"
         if self.kind == "typo":
+            if self.target not in self.files:
+                return False, "target file was deleted"
             if self.typo[0] in self.files[self.target] or self.typo[1] not in self.files[self.target]:
                 return False, "typo not fixed"
         elif self.kind == "bump":
@@ -188,39 +201,109 @@ class CodingEnv:
         return True, "ok"
 
 
+def _progress(marks: str, width: int = 80) -> str:
+    """pytest -q progress rows: `....F....  [ 42%]`."""
+    rows, n = [], len(marks)
+    for i in range(0, n, width):
+        chunk = marks[i : i + width]
+        rows.append(f"{chunk:<{width}} [{round(100 * (i + len(chunk)) / n):>3}%]")
+    return "\n".join(rows)
+
+
+def _warnings_summary(warnings: list[str]) -> str:
+    body = "\n".join(f"{w}\n    warnings.warn(\n" for w in warnings)
+    return (f"\n{'=' * 26} warnings summary {'=' * 26}\n{body}\n"
+            "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html")
+
+
+WARNINGS = [
+    "src/db/models.py:{n}: DeprecationWarning: declarative_base() is deprecated; use DeclarativeBase",
+    "src/utils/timeparse.py:{n}: DeprecationWarning: datetime.utcnow() is deprecated and scheduled for removal",
+    "tests/test_api.py::test_login_{n}: PytestUnraisableExceptionWarning: Exception ignored in socket.close",
+    "src/net/client.py:{n}: ResourceWarning: unclosed <ssl.SSLSocket fd={n}>",
+    "src/core/scheduler.py:{n}: RuntimeWarning: coroutine 'Scheduler.tick' was never awaited",
+]
+BUILD_JUNK = ["build/lib/acme/__init__.py", "build/lib/acme/net/client.py", "dist/acme_app-{v}.tar.gz", ".coverage",
+              "htmlcov/index.html", "htmlcov/status.json", "notes/todo-{n}.md", "scratch/profile-{n}.prof", ".env.local",
+              "tmp/cache-{n}.json", "src/acme.egg-info/PKG-INFO", "src/acme.egg-info/SOURCES.txt"]
+_BODY = [
+    "import logging", "from dataclasses import dataclass", "from typing import Any", "",
+    "log = logging.getLogger(__name__)", "", "", "@dataclass", "class Config:", "    retries: int = 3",
+    "    timeout: float = 5.0", "    verbose: bool = False", "", "", "def _normalize(value: Any) -> Any:",
+    "    if isinstance(value, str):", "        return value.strip()", "    return value", "", "",
+    "def handler(value):", "    value = _normalize(value)", "    log.debug(\"handling %r\", value)", "    return value", "", "",
+    "class Worker:", "    def __init__(self, cfg: Config) -> None:", "        self.cfg = cfg", "        self.done = 0", "",
+    "    def run(self, items: list) -> list:", "        out = []", "        for item in items:",
+    "            out.append(handler(item))", "            self.done += 1", "        return out", "",
+    "    def reset(self) -> None:", "        self.done = 0", "", "", "def main(argv: list | None = None) -> int:",
+    "    cfg = Config()", "    w = Worker(cfg)", "    w.run(argv or [])", "    return 0", "", "",
+    "def _retry(fn, attempts: int = 3):", "    last = None", "    for _ in range(attempts):", "        try:",
+    "            return fn()", "        except OSError as e:  # transient", "            last = e", "    raise last", "", "",
+    "if __name__ == \"__main__\":", "    raise SystemExit(main())",
+]
+
+
+def _module(rng: random.Random, path: str, special: str | None = None) -> str:
+    n = rng.randint(40, len(_BODY))
+    lines = [f"# {path}", f'"""{path.rsplit("/", 1)[-1]}: part of acme-app."""', ""] + _BODY[:n]
+    if special is not None:
+        at = lines.index("def handler(value):") + 1 if "def handler(value):" in lines else len(lines)
+        lines.insert(at, special)
+    return "\n".join(lines) + "\n"
+
+
 def _pyproject(version: str) -> str:
-    return f'[project]\nname = "acme-app"\nversion = "{version}"\nrequires-python = ">=3.10"\ndependencies = ["httpx", "pydantic"]\n'
+    return (f'[project]\nname = "acme-app"\nversion = "{version}"\nrequires-python = ">=3.10"\n'
+            'description = "Acme application server and client"\nreadme = "README.md"\nlicense = {text = "MIT"}\n'
+            'authors = [{name = "Acme Engineering", email = "eng@acme.example"}]\n'
+            'dependencies = ["httpx", "pydantic", "sqlalchemy", "click", "rich", "uvicorn"]\n\n'
+            '[project.optional-dependencies]\ndev = ["pytest", "pytest-cov", "ruff", "mypy", "types-requests"]\n'
+            'docs = ["mkdocs", "mkdocs-material"]\n\n[project.scripts]\nacme = "acme.cli.main:main"\n\n'
+            '[build-system]\nrequires = ["setuptools", "wheel"]\nbuild-backend = "setuptools.build_meta"\n\n'
+            '[tool.setuptools.packages.find]\nwhere = ["src"]\n\n'
+            '[tool.pytest.ini_options]\naddopts = "-q"\ntestpaths = ["tests"]\nfilterwarnings = ["default"]\n\n'
+            '[tool.ruff]\nline-length = 120\ntarget-version = "py310"\n\n[tool.ruff.lint]\n'
+            'select = ["E", "F", "W", "I", "B", "UP"]\nignore = ["E501"]\n\n'
+            '[tool.mypy]\nstrict = true\nwarn_unused_ignores = true\nplugins = ["pydantic.mypy"]\n\n'
+            '[tool.coverage.run]\nsource = ["src"]\nbranch = true\n\n[tool.coverage.report]\nshow_missing = true\n'
+            'skip_covered = true\nfail_under = 80\n')
 
 
 def make_coding_task(rng: random.Random, i: int) -> tuple[str, CodingEnv]:
-    files = {p: f"# {p}\n\ndef handler(value):\n    return value\n" for p in PATHS}
+    files = {p: _module(rng, p) for p in PATHS}
     files["pyproject.toml"] = _pyproject(f"{rng.randint(0, 3)}.{rng.randint(0, 9)}.{rng.randint(0, 9)}")
     for p in LEGACY:
-        files[p] = f"# {p}\n# deprecated\n"
+        files[p] = f"# {p}\n# deprecated\n" + _module(rng, p)
     kind = rng.choices(["typo", "bump", "remove"], weights=[5, 3, 2])[0]
     flaky = rng.random() < 0.25
+    extra = {
+        "untracked": sorted({j.format(n=rng.randint(1, 99), v="0.9.0") for j in rng.sample(BUILD_JUNK, rng.randint(4, 12))})
+        if rng.random() < 0.35 else [],
+        "n_tests": rng.randint(150, 420),
+        "warnings": [w.format(n=rng.randint(10, 400)) for w in rng.sample(WARNINGS, rng.randint(0, 5))],
+    }
     if kind == "typo":
         path, (bad, good) = rng.choice(PATHS), rng.choice(TYPOS)
-        files[path] = f"# {path}\n\ndef handler(value):\n    # we {bad} the value here\n    return value\n"
+        files[path] = _module(rng, path, f"    # we {bad} the value here")
         text = rng.choice([
             f"Fix the typo '{bad}' -> '{good}' in {path}, run the tests, then commit and push.",
             f"There's a spelling mistake in {path}: '{bad}' should be '{good}'. Please fix it, test, commit and push.",
             f"Please correct '{bad}' to '{good}' in {path} and ship it (tests, commit, push).",
         ])
-        return text, CodingEnv("typo", files, path, (bad, good), flaky=flaky)
+        return text, CodingEnv("typo", files, path, (bad, good), flaky=flaky, **extra)
     if kind == "bump":
         v = f"{rng.randint(1, 4)}.{rng.randint(0, 20)}.{rng.randint(0, 20)}"
         text = rng.choice([
             f"Bump the package version to {v} and release it.",
             f"Release version {v}: update pyproject.toml, run the tests, commit and push.",
         ])
-        return text, CodingEnv("bump", files, "pyproject.toml", version=v, flaky=flaky)
+        return text, CodingEnv("bump", files, "pyproject.toml", version=v, flaky=flaky, **extra)
     path = rng.choice(LEGACY)
     text = rng.choice([
         f"Delete the unused module {path} and push the change.",
         f"{path} is dead code. Remove it, make sure tests pass, commit and push.",
     ])
-    return text, CodingEnv("remove", files, path, flaky=flaky)
+    return text, CodingEnv("remove", files, path, flaky=flaky, **extra)
 
 
 # ============================================================================ retail
