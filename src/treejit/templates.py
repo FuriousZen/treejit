@@ -15,6 +15,8 @@ from __future__ import annotations
 import copy
 import difflib
 import json
+import re
+import shlex
 from dataclasses import dataclass
 from typing import Any
 
@@ -41,14 +43,50 @@ def cook(v: Any) -> str:
 
 
 def is_shell_arg(key: str, value: Any) -> bool:
-    return key in SHELL_KEYS and isinstance(value, str)
+    return shell_text(key, value) is not None
+
+
+# argv shell arguments (Codex CLI's `shell` tool: {"command": ["bash", "-lc", "git status"]}). The
+# command text is what policy and templates read; `wrap` says how to turn text back into the argument:
+#   None            a string argument (the text itself)
+#   [shell, flag]   ["bash"|"sh"|"zsh"|"dash"|"ksh", "-c"|"-lc"|...] + [text]: the script runs in that shell
+#   "argv"          any other list of strings: shlex.join(argv), and shlex.split back
+_ARGV_SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
+_ARGV_FLAG = re.compile(r"-[il]*c[il]*")
+
+
+def shell_text(key: str, value: Any) -> tuple[str, Any] | None:
+    """(command text, wrap) of a shell argument, or None if `key: value` isn't one."""
+    if key not in SHELL_KEYS:
+        return None
+    if isinstance(value, str):
+        return value, None
+    if not (isinstance(value, list) and value and all(isinstance(x, str) for x in value)):
+        return None
+    if len(value) == 3 and value[0].rsplit("/", 1)[-1] in _ARGV_SHELLS and _ARGV_FLAG.fullmatch(value[1]):
+        return value[2], value[:2]
+    return shlex.join(value), "argv"
+
+
+def unwrap(text: str, wrap: Any) -> Any:
+    """The argument for command `text` under `wrap` (see shell_text). ValueError if it can't be split."""
+    if wrap is None:
+        return text
+    if wrap == "argv":
+        return shlex.split(text)
+    return [*wrap, text]
 
 
 def shape_of(call: ToolCall) -> str:
     parts = []
     for k in sorted(call.args):
-        v = call.args[k]
-        parts.append([k, command_heads(v)] if is_shell_arg(k, v) else [k])
+        st = shell_text(k, call.args[k])
+        if st is None:
+            parts.append([k])
+        elif st[1] is None:
+            parts.append([k, command_heads(st[0])])      # unchanged for string commands
+        else:
+            parts.append([k, "argv", st[1], command_heads(st[0])])
     return canon([call.name, parts])
 
 
@@ -109,8 +147,11 @@ def anti_unify(calls: list[ToolCall]) -> dict:
     tpl: dict = {"tool": calls[0].name, "args": {}}
     for k in sorted(calls[0].args):
         vals = [c.args.get(k) for c in calls]
-        if is_shell_arg(k, vals[0]) and all(isinstance(v, str) for v in vals):
-            tpl["args"][k] = {"k": "sh", "items": unify_tokens([tokenize(v) for v in vals])}
+        sts = [shell_text(k, v) for v in vals]
+        if sts[0] is not None and all(st is not None and st[1] == sts[0][1] for st in sts):
+            tpl["args"][k] = {"k": "sh", "items": unify_tokens([tokenize(st[0]) for st in sts])}
+            if sts[0][1] is not None:
+                tpl["args"][k]["wrap"] = sts[0][1]
         elif all(canon(v) == canon(vals[0]) for v in vals):
             tpl["args"][k] = {"k": "c", "v": vals[0]}
         else:
@@ -158,14 +199,16 @@ def call_slots(tpl: dict, call: ToolCall) -> dict[str, Val] | None:
         elif kind == "v":
             out[k] = Val(cook(v), js=v)
         else:
-            if not isinstance(v, str):
+            st = shell_text(k, v)
+            if st is None or st[1] != at.get("wrap"):
                 return None
-            m = match_sh(at["items"], tokenize(v))
+            text = st[0]
+            m = match_sh(at["items"], tokenize(text))
             if m is None:
                 return None
-            out[k] = Val(v, raw=v, js=v)
+            out[k] = Val(text, raw=text, js=v)
             for j, gap in m[0].items():
-                out[f"{k}#{j}"] = Val(" ".join(t.val for t in gap), raw=v[gap[0].start : gap[-1].end] if gap else "")
+                out[f"{k}#{j}"] = Val(" ".join(t.val for t in gap), raw=text[gap[0].start : gap[-1].end] if gap else "")
     return out
 
 
@@ -223,7 +266,10 @@ def render(tpl: dict, ref_args: dict, values: dict[str, Val]) -> dict:
             val = values[k]
             args[k] = copy.deepcopy(val.js) if val.has_js() else _coerce(val.cooked, ref_args.get(k))
         else:
-            ref = ref_args[k]
+            st = shell_text(k, ref_args[k])
+            if st is None:
+                raise ValueError("reference call does not match its template")
+            ref = st[0]
             toks = tokenize(ref)
             m = match_sh(at["items"], toks)
             if m is None:
@@ -256,7 +302,7 @@ def render(tpl: dict, ref_args: dict, values: dict[str, Val]) -> dict:
             out = ref
             for start, end, new in sorted(edits, key=lambda e: -e[0]):
                 out = out[:start] + new + out[end:]
-            args[k] = out
+            args[k] = unwrap(out, at.get("wrap"))
     return args
 
 

@@ -57,6 +57,10 @@ class Config:
     t3: bool = True                # fill holes of a known edge with one small constrained call
     small_model: str = ""          # model for T2/T3 subcalls (default: the request's model)
     subcall_max_tokens: int = 512
+    # Anthropic subcall shape: auto (structured outputs; forced tool use only on legacy claude-3/2 models)
+    # | json_schema | tool_auto (strict tool, tool_choice auto) | tool (forced: 400s on Fable 5.1/Opus 5.5)
+    subcall_format: str = "auto"
+    subcall_effort: str = "low"    # output_config.effort for subcalls, on models that take it ("" = never)
     # failure handling
     tomb_k: float = 2.0            # decayed failures across distinct inputs before tombstoning
     tomb_prob: float = 0.5

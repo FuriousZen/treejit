@@ -27,6 +27,8 @@ import shlex
 from dataclasses import dataclass, field
 from typing import Any
 
+from treejit.subcalls import answer_content, subcall_tool
+
 # ============================================================================ coding
 
 CODING_TOOLS = [
@@ -504,8 +506,8 @@ class SimModel:
         self.usage = UsageModel(payload, cache)
 
     def __call__(self, body: dict) -> dict:
-        forced = (body.get("tool_choice") or {}).get("name", "")
-        if forced.startswith("treejit_"):
+        forced = subcall_tool(body)  # a treejit T2/T3 subcall (structured output or forced tool)
+        if forced:
             return self._subcall(body, forced)
         self.calls += 1
         msgs = body["messages"]
@@ -539,13 +541,15 @@ class SimModel:
             answer = self._subcall_answer(prompt, tool)
         except Exception:  # a confused model: say nothing useful
             answer = {"choice": 0} if tool == "treejit_choose" else {"not_this_step": True}
-        content = [{"type": "tool_use", "id": f"toolu_{self.rng.randrange(16 ** 20):020x}", "name": tool, "input": answer}]
-        prompt_chars = len(body.get("system", "")) + len(json.dumps(body.get("tools", []))) + len(json.dumps(body["messages"]))
+        content = answer_content(body, answer, f"toolu_{self.rng.randrange(16 ** 20):020x}")
+        prompt_chars = (len(body.get("system", "")) + len(json.dumps(body.get("tools", []))) + len(json.dumps(body["messages"]))
+                        + (len(json.dumps(body["output_config"])) if "output_config" in body else 0))
         usage = {"input_tokens": prompt_chars // 4, "output_tokens": len(json.dumps(content)) // 4 + 10}
         self.small_tokens[0] += usage["input_tokens"]
         self.small_tokens[1] += usage["output_tokens"]
         return {"id": f"msg_{self.rng.randrange(16 ** 12):012x}", "type": "message", "role": "assistant",
-                "model": body.get("model", "sim"), "content": content, "stop_reason": "tool_use", "stop_sequence": None,
+                "model": body.get("model", "sim"), "content": content,
+                "stop_reason": "tool_use" if content[0]["type"] == "tool_use" else "end_turn", "stop_sequence": None,
                 "usage": usage}
 
     def _subcall_answer(self, prompt: str, tool: str) -> dict:

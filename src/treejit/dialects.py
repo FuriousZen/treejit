@@ -1,13 +1,15 @@
-"""Wire dialects: Anthropic Messages and OpenAI-compatible Chat Completions.
+"""Wire dialects: Anthropic Messages, OpenAI-compatible Chat Completions, and the OpenAI
+Responses API (stateless use, as Codex CLI sends it).
 
 Each dialect parses a request body into a NormRequest, builds replay responses
 (JSON or SSE) from tool calls, extracts calls/usage from upstream responses
-(JSON or SSE, incrementally), and injects frontier hints.
+(JSON or SSE, incrementally), and inserts frontier hints (`inject_hint`, at the end of the
+history or, for a hint that is re-inserted, at the message it was first given after; see
+compaction.sticky_hints).
 """
 
 from __future__ import annotations
 
-import copy
 import json
 import re
 import time
@@ -45,9 +47,26 @@ def _sse(event: str | None, data: Any) -> bytes:
     return f"{head}data: {payload}\n\n".encode()
 
 
+# Anthropic models by how `thinking` behaves (model ids may carry a platform prefix such as
+# `anthropic.` or `us.anthropic.`, hence `search`):
+#   thinking_default_on: omitting `thinking` still runs adaptive thinking (Fable, Mythos, Opus 5,
+#       Opus 5.5, Sonnet 5, and later generations), so removing the parameter does not turn it off;
+#   thinking_always_on: `{"type": "disabled"}` is a 400 as well (Fable, Mythos, Opus 5.5 and later).
+_THINK_DEFAULT_ON = re.compile(r"claude-(?:fable|mythos|opus-(?:[5-9]|\d\d)|sonnet-(?:[5-9]|\d\d))(?:[-.@_]|$)")
+_THINK_ALWAYS_ON = re.compile(r"claude-(?:fable|mythos|opus-5-(?:[5-9]|\d\d)|opus-(?:[6-9]|\d\d))(?:[-.@_]|$)")
+
+
+def thinking_default_on(model: str) -> bool:
+    return bool(_THINK_DEFAULT_ON.search(model or ""))
+
+
+def thinking_always_on(model: str) -> bool:
+    return bool(_THINK_ALWAYS_ON.search(model or ""))
+
+
 # --------------------------------------------------------------------------- episodes
 #
-# Both dialects reduce a conversation to events, then apply the same episode rules:
+# The dialects reduce a conversation to events, then apply the same episode rules:
 #   ("u", text, msg_index, with_results)   a user text turn (with_results: text next to tool results)
 #   ("a", calls, text)                     an assistant turn
 #   ("r", call_id, Observation)            a tool result
@@ -247,7 +266,15 @@ class Dialect:
     def build_sse(self, model: str, calls: list[ToolCall], body: dict) -> list[bytes]: ...
     def parse_response(self, body: dict) -> ResponseInfo: ...
     def stream_accumulator(self) -> "StreamAccumulator": ...
-    def inject_hint(self, body: dict, text: str) -> dict: ...
+    def inject_hint(self, body: dict, text: str, at: int | None = None) -> dict:
+        """`body` with the hint inserted at history item `at` (default: the last one). Returns `body`
+        itself (the same object) when the hint can't go there."""
+        ...
+
+    def history(self, body: dict) -> list:
+        """The conversation items hints are anchored to (messages, or Responses input items)."""
+        msgs = body.get("messages")
+        return msgs if isinstance(msgs, list) else []
 
     def prepare_forward(self, req: NormRequest) -> dict:
         return req.raw
@@ -365,26 +392,31 @@ class Anthropic(Dialect):
     def stream_accumulator(self) -> StreamAccumulator:
         return _AnthropicStream()
 
-    def inject_hint(self, body: dict, text: str) -> dict:
-        body = copy.copy(body)
-        msgs = list(body.get("messages") or [])
-        if not msgs or msgs[-1].get("role") != "user":
+    def inject_hint(self, body: dict, text: str, at: int | None = None) -> dict:
+        msgs = body.get("messages") or []
+        i = len(msgs) - 1 if at is None else at
+        if not 0 <= i < len(msgs) or not isinstance(msgs[i], dict) or msgs[i].get("role") != "user":
             return body
-        last = dict(msgs[-1])
-        content = last.get("content")
+        msg = dict(msgs[i])
+        content = msg.get("content")
         blocks = [{"type": "text", "text": content}] if isinstance(content, str) else list(content or [])
         blocks.append({"type": "text", "text": text})
-        last["content"] = blocks
-        msgs[-1] = last
-        body["messages"] = msgs
-        return body
+        msg["content"] = blocks
+        msgs = list(msgs)
+        msgs[i] = msg
+        return dict(body, messages=msgs)
 
     def prepare_forward(self, req: NormRequest) -> dict:
         body = req.raw
-        # With extended thinking on, the API expects assistant turns in a tool loop to
-        # carry signed thinking blocks. Replayed turns have none, so fall back to a
-        # non-thinking frontier call for this episode.
-        if req.thinking and any(s.replayed_node for s in req.episode.steps):
+        # With extended thinking on, the API expects assistant turns in a tool loop to carry signed
+        # thinking blocks. Replayed turns have none, so on models where thinking can be turned off by
+        # leaving the parameter out, fall back to a non-thinking frontier call for this episode.
+        # On models that think by default (Fable, Mythos, Opus 5 / 5.5, Sonnet 5) leaving it out
+        # changes nothing but the cache prefix (and `disabled` is a 400 on the always-thinking ones),
+        # so the body goes as it is: replayed turns without thinking blocks are sent unchanged
+        # (repro/X2_live_check.py checks the API accepts them).
+        if (req.thinking and not thinking_default_on(req.model)
+                and any(s.replayed_node for s in req.episode.steps)):
             body = {k: v for k, v in body.items() if k != "thinking"}
         return body
 
@@ -564,20 +596,20 @@ class OpenAI(Dialect):
     def stream_accumulator(self) -> StreamAccumulator:
         return _OpenAIStream()
 
-    def inject_hint(self, body: dict, text: str) -> dict:
-        body = copy.copy(body)
-        msgs = list(body.get("messages") or [])
-        if not msgs:
+    def inject_hint(self, body: dict, text: str, at: int | None = None) -> dict:
+        msgs = body.get("messages") or []
+        i = len(msgs) - 1 if at is None else at
+        if not 0 <= i < len(msgs) or not isinstance(msgs[i], dict):
             return body
-        last = dict(msgs[-1])
-        c = last.get("content")
+        msg = dict(msgs[i])
+        c = msg.get("content")
         if isinstance(c, list):
-            last["content"] = list(c) + [{"type": "text", "text": text}]
+            msg["content"] = list(c) + [{"type": "text", "text": text}]
         else:
-            last["content"] = (c or "") + "\n\n" + text
-        msgs[-1] = last
-        body["messages"] = msgs
-        return body
+            msg["content"] = (c or "") + "\n\n" + text
+        msgs = list(msgs)
+        msgs[i] = msg
+        return dict(body, messages=msgs)
 
 
 def _openai_usage(u: dict) -> Usage:
@@ -617,7 +649,294 @@ class _OpenAIStream(StreamAccumulator):
         return self.info
 
 
-DIALECTS: dict[str, Dialect] = {"anthropic": Anthropic(), "openai": OpenAI()}
+# --------------------------------------------------------------------------- OpenAI Responses
+#
+# POST /v1/responses as a stateless client sends it (Codex CLI: `store: false`, the whole conversation in
+# `input` on every turn). Input items: messages (`{"role", "content"}`, `type: "message"` optional),
+# `function_call {id, call_id, name, arguments}` paired with `function_call_output {call_id, output}` on
+# call_id, `reasoning` items (kept as they are), and parsed-but-rarely-replayed `custom_tool_call {call_id,
+# name, input}` (args `{"$input": text}`) and `local_shell_call {call_id, action}` (tool `local_shell`,
+# args = the exec action without its type). Replayed calls carry the treejit id in `call_id`
+# (`call_tj_<node>_...`); the item `id` is `fc_tj...` and is stripped before a forward (see prepare_forward).
+#
+# Stateful requests (phase 1): `previous_response_id` (server-side chaining: `input` holds only the new
+# items) or `conversation` pass through untouched and unrecorded (tier `pass`, note `stateful`). A replayed
+# response id (`resp_tj...`) is unknown upstream, so treejit never answers a stateful conversation.
+
+CUSTOM_INPUT = "$input"                    # the single argument of a custom (freeform) tool call
+_CODEX_WRAPPERS = re.compile(r"<(environment_context|user_instructions|user_shell_command)>.*?</\1>", re.S)
+_CALL_ITEMS = ("function_call", "custom_tool_call", "local_shell_call")
+_OUTPUT_ITEMS = ("function_call_output", "custom_tool_call_output", "local_shell_call_output")
+
+
+def _responses_input(body: dict) -> list:
+    inp = body.get("input")
+    if isinstance(inp, str):
+        return [{"role": "user", "content": inp}]
+    return inp if isinstance(inp, list) else []
+
+
+def _item_type(item: dict) -> str:
+    return item.get("type") or ("message" if "role" in item else "")
+
+
+def _args_of(raw: Any) -> dict:
+    try:
+        args = json.loads(raw) if isinstance(raw, str) else (dict(raw) if isinstance(raw, dict) else {})
+    except (json.JSONDecodeError, ValueError):
+        return {"_raw": raw}
+    return args if isinstance(args, dict) else {"_value": args}
+
+
+def _call_of(item: dict) -> ToolCall | None:
+    t = _item_type(item)
+    cid = item.get("call_id") or item.get("id") or ""
+    if t == "function_call":
+        return ToolCall(cid, item.get("name", ""), _args_of(item.get("arguments")))
+    if t == "custom_tool_call":
+        return ToolCall(cid, item.get("name", ""), {CUSTOM_INPUT: item.get("input", "")})
+    if t == "local_shell_call":
+        action = {k: v for k, v in (item.get("action") or {}).items() if k != "type"}
+        return ToolCall(cid, "local_shell", action)
+    return None
+
+
+def _call_item(c: ToolCall) -> dict:
+    rid = REPLAY_MARK + rand_id(20)
+    if set(c.args) == {CUSTOM_INPUT}:
+        return {"type": "custom_tool_call", "id": "ctc_" + rid, "call_id": c.id, "name": c.name,
+                "input": str(c.args[CUSTOM_INPUT]), "status": "completed"}
+    if c.name == "local_shell":
+        return {"type": "local_shell_call", "id": "lsc_" + rid, "call_id": c.id, "status": "completed",
+                "action": dict(c.args, type="exec")}
+    return {"type": "function_call", "id": "fc_" + rid, "call_id": c.id, "name": c.name,
+            "arguments": json.dumps(c.args), "status": "completed"}
+
+
+def _responses_usage(u: dict) -> Usage:
+    cached = int(((u.get("input_tokens_details") or {}).get("cached_tokens")) or 0)
+    return Usage(int(u.get("input_tokens") or 0) - cached, int(u.get("output_tokens") or 0), cached, 0)
+
+
+def _responses_stop(resp: dict, calls: list, refused: bool = False) -> str:
+    """A Chat-Completions-style stop reason: an unfinished response maps to one engine.TRUNCATED knows."""
+    if (resp.get("status") or "completed") != "completed":
+        reason = (resp.get("incomplete_details") or {}).get("reason") or ""
+        return "content_filter" if reason == "content_filter" else "length"
+    if refused:
+        return "refusal"
+    return "tool_calls" if calls else "stop"
+
+
+def _message_text(item: dict) -> tuple[str, bool]:
+    text, refused = [], False
+    for part in item.get("content") or []:
+        if isinstance(part, dict):
+            if part.get("type") in ("output_text", "text"):
+                text.append(part.get("text", ""))
+            elif part.get("type") == "refusal":
+                refused = True
+    return "".join(text), refused
+
+
+class Responses(Dialect):
+    name = "responses"
+    call_prefix = "call"
+
+    def history(self, body: dict) -> list:
+        return _responses_input(body)
+
+    def parse_request(self, body: dict, mode: str = "auto") -> NormRequest:
+        items = _responses_input(body)
+        system_parts = [body["instructions"]] if isinstance(body.get("instructions"), str) else []
+        k = 0
+        while k < len(items) and isinstance(items[k], dict) and items[k].get("role") in ("system", "developer"):
+            system_parts.append(_text_of(items[k].get("content")))
+            k += 1
+        tools = []
+        for t in body.get("tools") or []:
+            if not isinstance(t, dict):
+                continue
+            ty = t.get("type", "function")
+            if ty == "function" and t.get("name"):
+                tools.append({"name": t["name"], "schema": t.get("parameters"), "description": t.get("description", "")})
+            elif ty == "custom" and t.get("name"):
+                tools.append({"name": t["name"], "schema": {"format": t.get("format")},
+                              "description": t.get("description", ""), "type": "custom"})
+            elif ty:  # built-in tools (local_shell, web_search, ...): by type
+                tools.append({"name": ty, "schema": None, "type": ty})
+        stateful = bool(body.get("previous_response_id") or body.get("conversation"))
+        events: list = []
+        for mi, item in enumerate(items):
+            if not isinstance(item, dict) or mi < k:
+                continue
+            t, role = _item_type(item), item.get("role")
+            if t in _CALL_ITEMS or t == "reasoning" or (t == "message" and role == "assistant"):
+                # consecutive model-side items (reasoning, text, calls) are one assistant turn
+                if not events or not isinstance(events[-1], list):
+                    events.append(["a", [], []])
+                c = _call_of(item)
+                if c is not None:
+                    events[-1][1].append(c)
+                elif t == "message":
+                    events[-1][2].append(_text_of(item.get("content")))
+            elif t in _OUTPUT_ITEMS:
+                out = item.get("output")
+                text = out if isinstance(out, str) else _text_of(out) if isinstance(out, list) else json.dumps(out)
+                events.append(("r", item.get("call_id") or item.get("id") or "", Observation(text, False)))
+            elif t == "message" and role == "user":
+                text = _CODEX_WRAPPERS.sub("", _text_of(item.get("content"))).strip()
+                if text:  # Codex's environment/instructions messages are context, not the task
+                    events.append(("u", text, mi, False))
+        events = [("a", e[1], "\n".join(e[2])) if isinstance(e, list) else e for e in events]
+        ep = episode_of(events, mode)
+        last = items[-1] if items and isinstance(items[-1], dict) else {}
+        ep.ready = (bool(items) and (_item_type(last) in _OUTPUT_ITEMS or last.get("role") == "user")
+                    and all(s.obs is not None for s in ep.steps))
+        ep.session = str(body.get("prompt_cache_key") or "")[:200]
+        ep.user = str(body.get("user") or body.get("safety_identifier") or "")[:200]
+        req = NormRequest("responses", body.get("model", ""), "\n".join(p for p in system_parts if p),
+                          [] if stateful else tools, bool(body.get("stream")), ep, body)
+        if stateful:
+            req.passthrough = "stateful"
+        return req
+
+    def _response(self, model: str, calls: list[ToolCall]) -> dict:
+        return {
+            "id": "resp_" + REPLAY_MARK + rand_id(20), "object": "response", "created_at": int(time.time()),
+            "status": "completed", "model": model, "output": [_call_item(c) for c in calls],
+            "error": None, "incomplete_details": None, "instructions": None, "metadata": {}, "parallel_tool_calls": True,
+            "temperature": None, "top_p": None, "tool_choice": "auto", "tools": [],
+            "usage": {"input_tokens": 0, "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0}, "output_tokens": 0,
+                      "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 0},
+        }
+
+    def build_response(self, model: str, calls: list[ToolCall]) -> dict:
+        return self._response(model, calls)
+
+    def build_sse(self, model: str, calls: list[ToolCall], body: dict) -> list[bytes]:
+        resp = self._response(model, calls)
+        out: list[bytes] = []
+
+        def ev(kind: str, **data: Any) -> None:
+            out.append(_sse(kind, {"type": kind, "sequence_number": len(out), **data}))
+
+        start = dict(resp, status="in_progress", output=[], usage=None)
+        ev("response.created", response=start)
+        ev("response.in_progress", response=start)
+        for i, item in enumerate(resp["output"]):
+            if item["type"] == "function_call":
+                ev("response.output_item.added", output_index=i, item=dict(item, arguments="", status="in_progress"))
+                ev("response.function_call_arguments.delta", item_id=item["id"], output_index=i, delta=item["arguments"])
+                ev("response.function_call_arguments.done", item_id=item["id"], output_index=i, arguments=item["arguments"])
+            elif item["type"] == "custom_tool_call":
+                ev("response.output_item.added", output_index=i, item=dict(item, input="", status="in_progress"))
+                ev("response.custom_tool_call_input.delta", item_id=item["id"], output_index=i, delta=item["input"])
+                ev("response.custom_tool_call_input.done", item_id=item["id"], output_index=i, input=item["input"])
+            else:
+                ev("response.output_item.added", output_index=i, item=dict(item, status="in_progress"))
+            ev("response.output_item.done", output_index=i, item=item)
+        ev("response.completed", response=resp)
+        return out
+
+    def parse_response(self, body: dict) -> ResponseInfo:
+        info = ResponseInfo()
+        refused = False
+        for item in body.get("output") or []:
+            if not isinstance(item, dict):
+                continue
+            c = _call_of(item)
+            if c is not None:
+                info.calls.append(c)
+            elif _item_type(item) == "message":
+                text, r = _message_text(item)
+                info.text += text
+                refused = refused or r
+        info.stop_reason = _responses_stop(body, info.calls, refused)
+        info.usage = _responses_usage(body.get("usage") or {})
+        return info
+
+    def stream_accumulator(self) -> StreamAccumulator:
+        return _ResponsesStream()
+
+    def inject_hint(self, body: dict, text: str, at: int | None = None) -> dict:
+        """A hint is its own user message item, inserted after item `at` (default: at the end)."""
+        items = _responses_input(body)
+        i = len(items) - 1 if at is None else at
+        if not 0 <= i < len(items):
+            return body
+        items = list(items)
+        items.insert(i + 1, {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]})
+        return dict(body, input=items)
+
+    def prepare_forward(self, req: NormRequest) -> dict:
+        """Replayed call items carry an item id (`fc_tj...`) the server never issued. Item ids are
+        optional on input, and whether the API accepts an unknown one is unverified (with `store: true` it
+        may try to resolve it, and reasoning models pair a function_call id with its reasoning item), so
+        the id is dropped from every replayed item; `call_id`, which pairs the output, stays."""
+        body = req.raw
+        items = body.get("input")
+        if req.passthrough or not isinstance(items, list):
+            return body
+        out, changed = [], False
+        for item in items:
+            if (isinstance(item, dict) and _item_type(item) in _CALL_ITEMS and "id" in item
+                    and Step(ToolCall(str(item.get("call_id") or ""), "", {})).replayed_node):
+                item = {k: v for k, v in item.items() if k != "id"}
+                changed = True
+            out.append(item)
+        return dict(body, input=out) if changed else body
+
+
+class _ResponsesStream(StreamAccumulator):
+    def __init__(self) -> None:
+        super().__init__()
+        self._items: dict[int, dict] = {}
+        self._args: dict[int, str] = {}
+        self._done: dict[int, dict] = {}
+        self._resp: dict | None = None
+        self._refused = False
+
+    def on_event(self, event: str | None, obj: dict) -> None:
+        t = obj.get("type") or event or ""
+        i = obj.get("output_index", 0)
+        if t == "response.output_item.added":
+            self._items[i] = dict(obj.get("item") or {})
+        elif t in ("response.function_call_arguments.delta", "response.custom_tool_call_input.delta"):
+            self._args[i] = self._args.get(i, "") + (obj.get("delta") or "")
+        elif t == "response.output_item.done":
+            self._done[i] = dict(obj.get("item") or {})
+        elif t == "response.output_text.delta":
+            self.info.text += obj.get("delta") or ""
+        elif t == "response.refusal.delta":
+            self._refused = True
+        elif t in ("response.completed", "response.incomplete", "response.failed"):
+            self._resp = obj.get("response") or {}
+            self.info.usage = _responses_usage(self._resp.get("usage") or {})
+            self.info.stop_reason = _responses_stop(self._resp, [None] if self._items else [], self._refused)
+
+    def result(self) -> ResponseInfo:
+        self.info.calls = []
+        for i in sorted(set(self._items) | set(self._done)):
+            item = self._done.get(i)
+            if item is None:  # the stream ended before the item was done: use what arrived
+                item = dict(self._items[i])
+                if _item_type(item) == "function_call":
+                    item["arguments"] = self._args.get(i, "")
+                elif _item_type(item) == "custom_tool_call":
+                    item["input"] = self._args.get(i, "")
+            c = _call_of(item)
+            if c is not None:
+                self.info.calls.append(c)
+        if not self.info.calls and self._resp is not None:
+            self.info.calls = [c for c in (_call_of(x) for x in self._resp.get("output") or [] if isinstance(x, dict))
+                               if c is not None]
+        if self._resp is not None:
+            self.info.stop_reason = _responses_stop(self._resp, self.info.calls, self._refused)
+        return self.info
+
+
+DIALECTS: dict[str, Dialect] = {"anthropic": Anthropic(), "openai": OpenAI(), "responses": Responses()}
 
 
 def get(name: str) -> Dialect:

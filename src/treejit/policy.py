@@ -17,7 +17,7 @@ import re
 
 from .config import Config
 from .shellwords import _ASSIGN, _skip_subst, program_index, segments, tokenize, unwrap
-from .templates import SHELL_KEYS
+from .templates import shell_text
 
 # Read-only whatever their arguments (none of them can write a file or run a command).
 _ANY_ARGS = {
@@ -538,8 +538,14 @@ def _match(name: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatchcase(name, p) for p in patterns)
 
 
+def _shell_args(args: dict) -> list[str]:
+    """The command text of every shell argument: a string, or an argv list (`["bash", "-lc", S]` -> S,
+    any other argv -> shlex.join(argv); see templates.shell_text)."""
+    return [st[0] for st in (shell_text(k, v) for k, v in args.items()) if st is not None]
+
+
 def is_readonly(tool: str, args: dict, cfg: Config) -> bool:
-    shell = [v for k, v in args.items() if k in SHELL_KEYS and isinstance(v, str)]
+    shell = _shell_args(args)
     if tool in cfg.shell_tools or (shell and not _match(tool, cfg.replay_tools)):
         return bool(shell) and all(shell_readonly(c, cfg) for c in shell)
     return _match(tool, cfg.replay_tools)
@@ -1133,9 +1139,8 @@ def commit_reason(tool: str, args: dict, cfg: Config) -> str:
     out = [f"tool {p}" for p in cfg.commit_tools if fnmatch.fnmatchcase(tool, p)][:1]
     pats = [p.split() for p in cfg.commit_commands if p.split()]
     ctx = _Ctx(pats, {p[0] for p in pats})
-    for k, v in args.items():
-        if k in SHELL_KEYS and isinstance(v, str):
-            _reasons(v, ctx, out)
+    for v in _shell_args(args):
+        _reasons(v, ctx, out)
     return "; ".join(dict.fromkeys(out))
 
 
@@ -1208,9 +1213,10 @@ def repo_taint(tool: str, args: dict, cfg: Config) -> str:
     doesn't): it writes `.git/*`, `.gitattributes` or `.gitmodules`, sets a git config key that can run
     a program, sets GIT_* variables, runs `init --bare`/`clone`/`submodule`, or extracts an archive."""
     for k, v in args.items():
-        if not isinstance(v, str):
+        st = shell_text(k, v)
+        if st is None and not isinstance(v, str):
             continue
-        why = _shell_taint(v) if k in SHELL_KEYS else (
+        why = _shell_taint(st[0]) if st is not None else (
             "git metadata path" if "\n" not in v and _GIT_META.search(v) else "")  # a path, not file content
         if why:  # reading `.gitattributes` changes nothing
             return "" if is_readonly(tool, args, cfg) else why

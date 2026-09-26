@@ -48,6 +48,18 @@ When (`compact_mode`)
       every forward. Fewest raw tokens, but it defeats prompt caching (+123% billed
       in the C1 model): only for providers without prompt caching.
 
+Preserved thinking (Claude Fable 5.1, Opus 5.5): a thinking block is bound to the exact
+prefix that produced it, and on accounts created on or after 2026-08-31 a request whose
+earlier history changed is a 400. first_sight is compatible (append-only, byte-stable).
+`window` is not (it edits an earlier message on every forward), and neither is `epoch`:
+its re-compaction of a cold conversation rewrites earlier tool results, which invalidates
+every later thinking block even though the cache is cold anyway. Use first_sight with
+those models.
+
+Sticky hints (`sticky_hints`, below) follow the same rule for frontier hints: a hint given
+after history item i is re-inserted at i, identically, in every later forward of the
+conversation.
+
 Determinism: the digest is a pure function of (call, observation) and decisions are
 sticky across tree rebuilds and restarts (keyed by call id + observation hash).
 Steps of earlier episodes of the same conversation (before the last user text
@@ -58,12 +70,13 @@ cache cost model these modes were chosen with.
 from __future__ import annotations
 
 import bisect
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any
 
 from .config import Config
-from .dialects import _text_of
+from .dialects import Dialect, _text_of
 from .features import guard_holds, obs_features, parse_json
 from .model import NormRequest, Observation, Step, ToolCall
 from .store import Store
@@ -301,9 +314,19 @@ def maybe_prune(store: Store, cfg: Config, t: float) -> int:
     return store.prune_compactions(t - cfg.compact_retention_days * 86400)
 
 
+def _output_text(item: dict) -> str:
+    out = item.get("output")
+    return out if isinstance(out, str) else _text_of(out) if isinstance(out, list) else json.dumps(out)
+
+
 def _results(req: NormRequest, body: dict) -> dict[str, tuple[str, bool]]:
     """Every tool result in the body, in order: {call_id: (text, is_error)}."""
     out: dict[str, tuple[str, bool]] = {}
+    if req.dialect == "responses":
+        for it in body.get("input") if isinstance(body.get("input"), list) else []:
+            if isinstance(it, dict) and it.get("type") in _OUTPUTS and isinstance(it.get("call_id"), str):
+                out.setdefault(it["call_id"], (_output_text(it), False))
+        return out
     for m in body.get("messages") or []:
         if not isinstance(m, dict):
             continue
@@ -338,8 +361,23 @@ def _replace(content: Any, text: str) -> Any:
     return [block]
 
 
+_OUTPUTS = ("function_call_output", "custom_tool_call_output")
+
+
 def _rewrite(dialect: str, body: dict, out: dict[str, str]) -> tuple[dict, set[str]]:
     """Copy-on-write replacement of tool results by call id. Returns (body, ids replaced)."""
+    if dialect == "responses":
+        items = body.get("input") if isinstance(body.get("input"), list) else []
+        new_items, done = list(items), set()
+        for i, it in enumerate(items):
+            cid = it.get("call_id") if isinstance(it, dict) else None
+            if (isinstance(cid, str) and it.get("type") in _OUTPUTS and cid in out and cid not in done
+                    and (isinstance(it.get("output"), str) or (isinstance(it.get("output"), list) and all(
+                        isinstance(p, dict) and p.get("type") in ("input_text", "text") for p in it["output"])))):
+                o = it.get("output")
+                new_items[i] = dict(it, output=out[cid] if isinstance(o, str) else [{"type": "input_text", "text": out[cid]}])
+                done.add(cid)
+        return (dict(body, input=new_items), done) if done else (body, done)
     msgs = body.get("messages") or []
     new_msgs = list(msgs)
     done: set[str] = set()
@@ -369,3 +407,62 @@ def _rewrite(dialect: str, body: dict, out: dict[str, str]) -> tuple[dict, set[s
     if not done:
         return body, done
     return dict(body, messages=new_msgs), done
+
+
+# ------------------------------------------------------------------ sticky hints (PLAN H1 / X2)
+#
+# A frontier hint (replay.hints) used to be appended to the forwarded copy of one request only. The next
+# request no longer had it: the provider saw an earlier message change, which moves the prompt-cache prefix
+# (+156-247% billed under automatic caching with hints=always) and, on models with preserved thinking,
+# invalidates every later thinking block (a 400 on enforced accounts). Now a hint is part of the
+# conversation from the moment it is first forwarded: it is stored under an *anchor* (a chained hash of
+# the dialect, system prompt, tool names and every history item up to and including the one it follows,
+# cache_control markers ignored) and re-inserted, byte-identical, at the same position in every later
+# forward whose history has that prefix. A new hint is only ever given after the last item; if that
+# position already has one (a retried request, or another conversation with the very same prefix) the
+# stored one is reused. Hints unused for `compact_retention_days` are pruned.
+
+
+def _no_cc(x: Any) -> Any:
+    if isinstance(x, dict):
+        return {k: _no_cc(v) for k, v in x.items() if k != "cache_control"}
+    if isinstance(x, list):
+        return [_no_cc(v) for v in x]
+    return x
+
+
+def hint_anchors(req: NormRequest, items: list) -> list[str]:
+    """Anchor of each history position (see above)."""
+    acc = hashlib.sha256(json.dumps(["hints", req.dialect, req.system, [t.get("name") for t in req.tools]],
+                                    ensure_ascii=False).encode()).digest()
+    out = []
+    for it in items:
+        acc = hashlib.sha256(acc + json.dumps(_no_cc(it), sort_keys=True, ensure_ascii=False,
+                                              separators=(",", ":")).encode()).digest()
+        out.append(acc.hex()[:32])
+    return out
+
+
+def sticky_hints(store: Store, d: Dialect, req: NormRequest, body: dict, hint: str | None,
+                 retention_days: float = 7.0) -> tuple[dict, str | None]:
+    """`body` with every hint this conversation was given re-inserted, plus `hint` (if any, and if this
+    position has none yet) after its last item. Returns (body, the hint after the last item or None)."""
+    items = d.history(req.raw)
+    if not items:
+        return body, None
+    t = now()
+    if retention_days > 0 and t >= getattr(store, "_hint_prune_at", 0.0):
+        store._hint_prune_at = t + PRUNE_EVERY  # type: ignore[attr-defined]
+        store.prune_hints(t - retention_days * 86400)
+    anchors = hint_anchors(req, items)
+    rows = store.hints(anchors)
+    last = anchors[-1]
+    if hint and last not in rows and d.inject_hint(body, hint) is not body:
+        store.save_hint(last, len(anchors) - 1, hint)
+        rows = store.hints(anchors)  # the first hint stored at a position wins
+    used = [i for i, a in enumerate(anchors) if a in rows]
+    for i in reversed(used):  # from the end: an inserted item never shifts a later insertion point
+        body = d.inject_hint(body, rows[anchors[i]], at=i)
+    if used:
+        store.touch_hints([anchors[i] for i in used], t)
+    return body, rows.get(last)

@@ -7,6 +7,8 @@
 Routes:
     POST /v1/messages                 Anthropic Messages (JSON or SSE)
     POST /v1/chat/completions         OpenAI-compatible chat completions (JSON or SSE)
+    POST /v1/responses                OpenAI Responses API (JSON or SSE; stateless requests are learned and
+                                      replayed, `previous_response_id` / `conversation` pass through)
     POST /outcome                     {"run_id": "...|latest", "outcome": "pass|fail|error", "reason": "..."}
     GET  /health, GET /stats
     anything else                     passed through untouched
@@ -27,7 +29,8 @@ HOP = {"host", "content-length", "connection", "keep-alive", "transfer-encoding"
        "proxy-authorization", "proxy-authenticate", "accept-encoding"}
 RESP_DROP = {"content-length", "connection", "transfer-encoding", "content-encoding", "keep-alive"}
 
-ROUTES = {"/v1/messages": "anthropic", "/v1/chat/completions": "openai", "/chat/completions": "openai"}
+ROUTES = {"/v1/messages": "anthropic", "/v1/chat/completions": "openai", "/chat/completions": "openai",
+          "/v1/responses": "responses", "/responses": "responses"}
 
 
 class ProxyApp:
@@ -94,7 +97,7 @@ class ProxyApp:
     def _upstream(self, dialect: str, headers: dict) -> str:
         if dialect == "anthropic":
             return self.cfg.anthropic_upstream.rstrip("/")
-        if dialect == "openai":
+        if dialect in ("openai", "responses"):
             return self.cfg.openai_upstream.rstrip("/")
         return (self.cfg.anthropic_upstream if ("x-api-key" in headers or "anthropic-version" in headers)
                 else self.cfg.openai_upstream).rstrip("/")

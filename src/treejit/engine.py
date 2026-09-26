@@ -109,7 +109,7 @@ class TreeJIT:
         mode = str(hdrs.get(EPISODE_HEADER) or self.cfg.episode_mode).strip().lower()
         req = d.parse_request(body, mode=mode)
         if not req.tools:
-            rid = self.store.log_request(dialect=dialect, tier="pass", note="no_tools")
+            rid = self.store.log_request(dialect=dialect, tier="pass", note=req.passthrough or "no_tools")
             return Result("forward", body, req.stream, ctx=_Pending(rid, None, "", "", None, t0))
 
         fam = families.resolve(self.store, req.system, req.tools, dialect)
@@ -206,9 +206,10 @@ class TreeJIT:
         comp = compaction.apply(self.store, view, self.cfg, req, fwd) if self.cfg.compact else None
         if comp is not None:
             fwd = comp.body
-        hint = hints(view, self.cfg, plan.node)
-        if hint:
-            fwd = d.inject_hint(fwd, hint)
+        # hints are sticky: every hint given earlier in this conversation is re-inserted where it was
+        # first given, so the forwarded history stays append-only (prompt cache, preserved thinking)
+        fwd, hint = compaction.sticky_hints(self.store, d, req, fwd, hints(view, self.cfg, plan.node),
+                                           self.cfg.compact_retention_days)
         if plan.node:
             self.store.hit(plan.node)
         note = plan.reason + ("; " + "; ".join(plan.detail) if plan.detail else "") + ("; hints" if hint else "")

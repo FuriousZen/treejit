@@ -15,7 +15,7 @@ from treejit.config import Config
 from treejit.dialects import get as dialect
 from treejit.model import ToolCall
 from treejit.replay import Option, Subcall
-from treejit.subcalls import CHOOSE_TOOL, FILL_TOOL, build, resolve, tool_input
+from treejit.subcalls import CHOOSE_TOOL, FILL_TOOL, answer_content, build, resolve, subcall_tool, tool_input
 from treejit.templates import anti_unify, var_slots
 from treejit.tree import EdgeInfo, NodeEdge
 from treejit.util import now
@@ -31,18 +31,23 @@ class SubModel(Model):
         self.sub_bodies: list[dict] = []
 
     def __call__(self, body: dict) -> dict:
-        tc = body.get("tool_choice") or {}
-        name = tc.get("name", "")
-        if not name.startswith("treejit_"):
+        if not subcall_tool(body):
             return super().__call__(body)
         self.small += 1
         self.sub_bodies.append(body)
         out = self.answer(body)
         if out.get("type") == "message":
             return out
-        return {"id": "msg_s", "type": "message", "role": "assistant", "model": body["model"], "stop_reason": "tool_use",
-                "content": [{"type": "tool_use", "id": "toolu_sub", "name": name, "input": out}],
+        content = answer_content(body, out)  # a JSON text block (structured outputs) or a tool_use block
+        return {"id": "msg_s", "type": "message", "role": "assistant", "model": body["model"],
+                "stop_reason": "tool_use" if content[0]["type"] == "tool_use" else "end_turn", "content": content,
                 "usage": {"input_tokens": 30, "output_tokens": 8}}
+
+
+def sub_schema(body: dict) -> dict:
+    """The answer schema of a subcall body, whatever its shape."""
+    fmt = (body.get("output_config") or {}).get("format")
+    return fmt["schema"] if fmt else body["tools"][0]["input_schema"]
 
 
 def fs_exec(files: dict[str, str]):
@@ -84,7 +89,7 @@ def commit_policy(task, hist, body):
 
 def fill_all(value):
     def answer(body):
-        props = body["tools"][0]["input_schema"]["properties"]
+        props = sub_schema(body)["properties"]
         return {p: value for p in props if p != "not_this_step"}
     return answer
 
@@ -108,7 +113,10 @@ def test_t3_fills_free_form_commit_message(jit):
     assert len(ids) == 2 and ids[1].endswith("_t3")
     assert model.small == 1 and model.calls - before == 1  # the final answer only
     sub = model.sub_bodies[0]
-    assert sub["tool_choice"] == {"type": "tool", "name": FILL_TOOL} and "stream" not in sub
+    # structured outputs, never a forced tool_choice (a 400 on Fable 5.1 / Mythos 5.1 / Opus 5.5)
+    assert "tool_choice" not in sub and "tools" not in sub and "thinking" not in sub and "stream" not in sub
+    assert sub["output_config"]["format"]["type"] == "json_schema" and subcall_tool(sub) == FILL_TOOL
+    assert sub["output_config"]["format"]["schema"]["additionalProperties"] is False
     assert len(sub["messages"]) == 1 and "<command_0>" in sub["messages"][0]["content"]
     assert "commit src/m7.py" in sub["messages"][0]["content"] and "code 7" in sub["messages"][0]["content"]
     row = jit.store.q1("SELECT * FROM requests WHERE tier='T3'")
@@ -200,7 +208,8 @@ def test_t2_resolves_ambiguous_node(jit):
     end_notes = [r["note"] for r in jit.store.q("SELECT note FROM requests WHERE run_id LIKE 'x-%' AND tier='T4'")]
     assert end_notes and all(n.startswith("end@") for n in end_notes)
     sub = model.sub_bodies[0]
-    assert sub["tool_choice"]["name"] == CHOOSE_TOOL and "(used in 3 earlier successful runs)" in sub["messages"][0]["content"]
+    assert subcall_tool(sub) == CHOOSE_TOOL and "tool_choice" not in sub
+    assert "(used in 3 earlier successful runs)" in sub["messages"][0]["content"]
     # a T2 pick is the model's choice: it is logged as such, so it feeds the node's evidence
     assert jit.store.q1("SELECT replayed FROM steps WHERE run_id='x-0' AND idx=1")["replayed"] == 0
     # "something else" goes to the model
@@ -280,7 +289,7 @@ def test_proxy_subcall_then_sse_replay(tmp_path):
         path, headers, raw = seen[-2]
         sub = json.loads(raw)
         assert path == "/v1/messages" and headers.get("x-api-key") == "k" and "x-treejit-run" not in headers
-        assert sub["tool_choice"]["name"] == FILL_TOOL and not sub.get("stream")
+        assert subcall_tool(sub) == FILL_TOOL and "tool_choice" not in sub and not sub.get("stream")
         await client.aclose()
         await up.aclose()
         jit.close()
