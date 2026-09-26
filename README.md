@@ -26,7 +26,8 @@ This is the MVP from the handoff, plus value branching and composite argument te
 | Benchmark harness (synthetic suite, inline and real-proxy modes) + learning-curve report | done |
 | T2 choose / budget checkpoint, T3 hole filling (one small forced-tool subcall, proxy and inline) | done |
 | Frontier prefix compaction (verified replayed observations digested in forwarded requests) | done, **opt-in** (`compact = true`) |
-| Macros-as-tools, OpenAI Responses API, inline-mode streaming replay | not yet |
+| Inline-mode streaming replay (`stream=True` and Anthropic `messages.stream()`: replay, record, END) | done (sync clients) |
+| Macros-as-tools, OpenAI Responses API | not yet |
 | tau-bench runner | not yet: only the synthetic suite has been run |
 
 The core (`src/treejit`, except `proxy.py`) uses only the standard library. Proxy mode also needs `httpx` and `uvicorn`.
@@ -100,8 +101,12 @@ from treejit import TreeJIT
 jit = TreeJIT("treejit.db")
 client = jit.wrap(anthropic.Anthropic())             # or an OpenAI client, or a callable body -> dict
 client.messages.create(..., extra_headers={"X-TreeJIT-Run": "task-17"})
+with client.messages.stream(..., extra_headers={"X-TreeJIT-Run": "task-17"}) as s:  # streaming works too
+    msg = s.get_final_message()
 jit.outcome("task-17", "pass")
 ```
+
+Streaming (`create(stream=True)`) takes the same path as JSON. A replay returns a `ReplayStream`: the replay's events, served locally, as SDK event models (`RawMessageStreamEvent`, `ChatCompletionChunk`) when the SDK is installed and as dicts otherwise. A forward returns a `TeeStream`: the upstream events, unchanged, recorded (usage, run, END) when the stream is exhausted. Closing it before the stop reason arrives records status 499 and no END. Anthropic's `messages.stream()` is the SDK's own `MessageStreamManager` fed by those streams (`text_stream`, `get_final_message()`, derived `text`/`input_json` events); without the SDK a minimal shim with the same methods is used. `X-TreeJIT-Run` never goes upstream. Everything else on the client (`messages.count_tokens`, `messages.batches`, `beta`, `with_raw_response`, ...) is the real client's and is not recorded.
 
 **Inspect and operate**
 
@@ -253,7 +258,8 @@ Each forwarded request records `compacted N obs/C chars` in its note and the cha
 - **Stable-prefix learning.** A dynamic block early in the system prompt shrinks the learned prefix to whatever precedes it.
 - **One misroute before a chance rule is caught.** A task-word rule whose first `task_rule_support` examples all agree by chance still replays once into the input that breaks it; the failed run then demotes it (seed 3, task 13). A higher `task_rule_support` trades small calls for fewer of these.
 - **Negatives are counted per rule, not per input class.** A rule with many passing replays that starts misrouting a new kind of task needs several failures before the excess over the tolerated rate (`1 - purity`) shows. Only then is it demoted.
-- **END needs a passing run and a visible final answer.** Streams consumed outside the engine (inline-mode streaming) don't record where the model stopped, and runs without an outcome never add END evidence.
+- **END needs a passing run and a visible final answer.** A forwarded inline stream records where the model stopped only if the caller reads it to the stop reason; one closed earlier is logged as 499. Runs without an outcome never add END evidence.
+- **Inline mode is synchronous.** `AsyncAnthropic` / `AsyncOpenAI` are rejected by `wrap()`; use the proxy for async harnesses. `messages.stream(output_format=...)` (structured outputs), `beta.messages`, `with_raw_response` and `chat.completions.stream()` pass through to the real client unrecorded (the run header is still stripped from `messages.stream`). A `ReplayStream` has `.response = None`, so `request_id` on a replayed `MessageStream` is unavailable.
 - **Compaction and the prompt cache.** The keep-last window moves as the conversation grows. The step that leaves it changes from full to compacted once, which invalidates the cache from that message on. A chunked boundary (advancing the window only every few steps) would trade a little compaction for longer cache hits; it isn't implemented.
 - **Run identity.** Without an `X-TreeJIT-Run` header, run ids are derived from the task and first tool-call id. Resuming the same task text in a new conversation starts a new run.
 
