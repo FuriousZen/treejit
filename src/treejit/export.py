@@ -40,7 +40,7 @@ def tree_data(store: Store, family: str, max_depth: int = 40) -> dict[str, Any]:
         return {
             "node": ne["node"], "edge": ne["edge"], "label": edges[ne["edge"]]["label"] if ne["edge"] in edges else ne["edge"],
             "tool": edges[ne["edge"]]["tool"] if ne["edge"] in edges else "?",
-            "tier": ne["tier"], "pass": ne["pass_runs"], "fail": ne["fail_runs"], "n": ne["n"],
+            "tier": ne["tier"], "blocked": ne["blocked"] or "", "pass": ne["pass_runs"], "fail": ne["fail_runs"], "n": ne["n"],
             "conf": ne["conf"], "purity": ne["purity"], "blamed": ne["blamed"],
             "bindings": {k: rule_label(v) for k, v in bindings.items()},
             "guard": json.loads(ne["guard"] or "{}"), "post": json.loads(ne["post"] or "{}"),
@@ -105,7 +105,7 @@ def show_text(store: Store, family: str | None = None, ids: bool = False, max_de
             for m in d["macros"][:20]:
                 out.append(f"    [{' → '.join(short(c, 30) for c in m['ctx'])}]")
                 for it in m["children"]:
-                    out.append(f"      ↳ [{it['tier'].upper():4}] {it['label']}  {_stats(it)}" + (f"  node={it['node']}" if ids else ""))
+                    out.append(f"      ↳ [{_tier_tag(it)}] {it['label']}  {_stats(it)}" + (f"  node={it['node'][:8]}" if ids else ""))
         out.append("")
     return "\n".join(out) if out else "(empty: no recorded runs yet)"
 
@@ -121,9 +121,15 @@ def _text_walk(items: list[dict], indent: str, out: list[str], ids: bool) -> Non
     for i, it in enumerate(items):
         last = i == len(items) - 1
         branch = "└─ " if last else "├─ "
-        extra = f"  node={it['node']} edge={it['edge']}" if ids else ""
-        out.append(f"{indent}{branch}[{it['tier'].upper():4}] {it['label']}  {_stats(it)}{extra}")
+        extra = f"  node={it['node'][:8]} edge={it['edge'][:8]}" if ids else ""
+        out.append(f"{indent}{branch}[{_tier_tag(it)}] {it['label']}  {_stats(it)}{extra}")
         _text_walk(it["children"], indent + ("   " if last else "│  "), out, ids)
+
+
+def _tier_tag(it: dict) -> str:
+    """HOT / LIVE:holes / LIVE:needs_approval ...; the reason only where it isn't implied by the tier."""
+    tag = f"{it['tier'].upper():4}"
+    return f"{tag.strip()}:{it['blocked']}" if it["tier"] == "live" and it["blocked"] else tag
 
 
 # ------------------------------------------------------------------ mermaid

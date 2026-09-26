@@ -21,7 +21,7 @@ This is the MVP from the handoff, plus two pieces pulled forward because the ben
 | Tree builder: anti-unification, provenance bindings, last-k-edge macros, root depth cap D | done |
 | T0 replay / T1 guarded branch, postcondition side exits, confidence budget, hard cap K, batching | done |
 | Read-only allowlist, commit points + operator approval, soft tombstones, node-local T4 hints | done |
-| CLI: `serve show runs outcome pin approve prune export build stats`; HTML / Mermaid / SKILL.md export | done |
+| CLI: `serve show runs explain outcome pending pin approve revoke prune export build stats`; HTML / Mermaid / SKILL.md export | done |
 | Benchmark harness (synthetic suite, inline and real-proxy modes) + learning-curve report | done |
 | T2 checkpoints, T3 hole filling | **not yet**: those cases go to the model (T4) |
 | Prefix compaction, macros-as-tools, OpenAI Responses API, inline-mode streaming replay | not yet |
@@ -87,15 +87,21 @@ jit.outcome("task-17", "pass")
 **Inspect and operate**
 
 ```bash
-treejit show --ids          # tree with tiers, bindings, guards, decision lists, macros
+treejit show --ids          # tree with tiers, bindings, guards, decision lists, macros; short node/edge ids
 treejit runs; treejit stats
+treejit explain <run|latest> [--json]   # per-step timeline: who decided (model/T0/T1/...), why, tokens, first obs line
+treejit pending [--family F] [--json]   # promoted edges held back only by policy: example call, evidence, approve commands
+treejit approve --review                # walk the queue: y = at the listed nodes, e = everywhere, n/s = leave, q = stop
 treejit approve <edge|'*'> [--node N]   # let replay cross a write edge / commit point
+treejit revoke <edge> [--node N]        # same as approve --revoke
 treejit pin <node> [edge]               # force-promote, protect from eviction
 treejit prune --days 30 --min-hits 3
 treejit export --format html|mermaid|skills --out ...
 ```
 
-Each tree edge has a tier: **hot** (replayable), **live** (promoted but has holes or needs approval), **warm** (one passing run), **cold**, or **tomb**.
+Ids (edges, nodes, families, runs) can be given as any unique prefix of at least 4 characters; the CLI prints 8.
+
+Each tree edge has a tier: **hot** (replayable), **live** (promoted but blocked), **warm** (one passing run), **cold**, or **tomb**. `show` prints why a live edge doesn't replay: `LIVE:holes` (an argument has no binding), `LIVE:needs_approval` (not read-only, or a commit point), or `LIVE:commit_point_needs_evidence` (approved, but a commit point also needs `promote_runs + 1` passing runs). Only the last two appear in `pending`: approval can't fix holes or tombstones.
 
 ## How it works
 
@@ -109,7 +115,7 @@ Each tree edge has a tier: **hot** (replayable), **live** (promoted but has hole
 | `features.py` | Predicate set: error/exit code, empty, JSON field equals, substring, task keyword. Guards are conjunctions of stable features; branches are decision lists. |
 | `builder.py` | Deterministic rebuild from the trace log on every outcome (bounded to the last `max_runs`): promotion, bindings, guards, postconditions, credit assignment, tombstones, tiers, priority score. |
 | `tree.py`, `replay.py` | Stateless recognition (root path ≤ D, then last-k n-grams). Climbs T0 → T1 → T4, bounded by budget, cap, allowlist and commit points. |
-| `proxy.py`, `inline.py`, `cli.py`, `export.py` | The two entry points, CLI, and views. |
+| `proxy.py`, `inline.py`, `cli.py`, `export.py`, `operate.py` | The two entry points, CLI, views, and operator tools (approval queue, run timelines, short ids). |
 
 ### Decisions made during implementation
 
@@ -134,6 +140,6 @@ The handoff didn't specify these. Each one came from a failure seen in the bench
 
 ```bash
 pip install -e '.[dev]' -e bench
-pytest -q                                   # 37 tests, ~1 s
+pytest -q                                   # 44 tests, ~2 s
 python -m treejit_bench --tasks 200 --out bench_out [--via-proxy] [--seed N] [--family coding|retail|mixed]
 ```
