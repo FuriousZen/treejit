@@ -23,6 +23,7 @@ This is the MVP from the handoff, plus value branching and composite argument te
 | T0 replay / T1 guarded branch, postcondition side exits, confidence budget, hard cap K, batching | done |
 | Read-only allowlist, commit points + operator approval, soft tombstones, node-local T4 hints | done |
 | CLI: `serve show runs explain outcome pending pin approve revoke prune export build stats`; HTML / Mermaid / SKILL.md export | done |
+| Run identity (header, harness session id, derived; forks instead of extending finished runs) and multi-turn episodes (user steps) | done |
 | Benchmark harness (synthetic suite, inline and real-proxy modes) + learning-curve report | done |
 | T2 choose / budget checkpoint, T3 hole filling (one small forced-tool subcall, proxy and inline) | done |
 | Frontier prefix compaction (verified replayed observations digested in forwarded requests) | done, **opt-in** (`compact = true`) |
@@ -79,9 +80,10 @@ treejit serve --port 8787          # db: ./treejit.db (or --db / $TREEJIT_DB)
 
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
-export ANTHROPIC_CUSTOM_HEADERS="X-TreeJIT-Run: $(uuidgen)"   # optional; run ids are derived otherwise
 claude
 ```
+
+No run header is needed: Claude Code's session id (in `metadata.user_id`) plus the episode index names each task's run, and every prompt after a finished answer starts a new episode (see [Runs and episodes](#runs-and-episodes)).
 
 **Outcomes.** Only runs reported as passing ever promote an edge.
 
@@ -113,7 +115,7 @@ Streaming (`create(stream=True)`) takes the same path as JSON. A replay returns 
 ```bash
 treejit show --ids          # tree with tiers, bindings, guards, decision lists, macros; short node/edge ids
 treejit runs; treejit stats
-treejit explain <run|latest> [--json]   # per-step timeline: who decided (model/T0/T1/...), why, tokens, first obs line
+treejit explain <run|latest> [--json]   # per-step timeline: who decided each step (model/T0/T1/T2/ck/T3/user), why, tokens
 treejit pending [--family F] [--json]   # promoted edges held back only by policy: example call, evidence, approve commands
 treejit approve --review                # walk the queue: y = at the listed nodes, e = everywhere, n/s = leave, q = stop
 treejit approve <edge|'*'> [--node N]   # let replay cross a write edge / commit point
@@ -124,7 +126,9 @@ treejit prune --days 30 --min-hits 3
 treejit export --format html|mermaid|skills --out ...
 ```
 
-Ids (edges, nodes, families, runs) can be given as any unique prefix of at least 4 characters; the CLI prints 8.
+Ids (edges, nodes, families, runs) can be given as any unique prefix of at least 4 characters; the CLI prints 8. `--db` and `--config` go before or after the subcommand.
+
+`explain` accounts for every logged request of the run, so its token total equals the `requests` table's for that run. The header line counts small calls (`small calls: N (M failed), T tokens`). A step is labelled by what produced it: `model`, `T0`/`T1` (replay), `T2` (the model picked it among known children), `ck` (the model confirmed it at a budget checkpoint) or `T3` (the model filled its holes), read from the call id's suffix. A small call that failed shows as its own row (`(T2 small call failed: chose_new → model)`), followed by the model's step. A text answer the conversation went on after reads `replied to the user`, and later user turns show as `user` rows between the steps.
 
 Each tree edge has a tier: **hot** (replayable), **live** (promoted but blocked), **warm** (one passing run), **cold**, or **tomb**. `show` prints why a live edge doesn't replay: `LIVE:holes` (an argument has no binding), `LIVE:needs_approval` (not read-only, or a commit point), or `LIVE:commit_point_needs_evidence` (approved, but a commit point also needs `promote_runs + 1` passing runs). Only the last two appear in `pending`: approval can't fix holes or tombstones.
 
@@ -132,7 +136,7 @@ Each tree edge has a tier: **hot** (replayable), **live** (promoted but blocked)
 
 | module | job |
 |---|---|
-| `dialects.py` | Parse requests into an *episode* (task + (call, observation) steps). Build replay responses as JSON or SSE. Accumulate upstream SSE for usage. Inject hints. |
+| `dialects.py` | Parse requests into an *episode* (task + (call, observation) steps, with later user turns as user steps; see [Runs and episodes](#runs-and-episodes)) and read harness session ids. Build replay responses as JSON or SSE. Accumulate upstream SSE for usage. Inject hints. |
 | `families.py` | Tree key = tool schemas + the stable lines of the system prompt. Lines are masked (dates, times, absolute paths, hashes, uuids, URLs, numbers; git status and commit-log lines collapse to one placeholder), hashed and counted per family, weighted by length. A line is stable when ≥80% of the family's distinct prompts have it (every line, for a 1-member family). A prompt joins a family when it has ≥90% of the family's stable characters and the stable lines make up ≥80% of its own; ties go to the best coverage, then the oldest family. Volatile lines anywhere (an early `<env>`, a large `gitStatus`) don't split a family; a different agent sharing a short preamble doesn't merge into one. Ids never change. Families from the old prefix keying are seeded from their prefix and keep its `startswith` rule. `families.prefix` shows the stable (masked) lines. |
 | `shellwords.py` | Span-preserving shell tokenizer (quotes, `$(...)`, heredocs, operators). Replayed commands are spliced into the original text, so quoting survives. |
 | `policy.py` | What replay may emit unattended: the read-only allowlist and commit points (see [Replay safety](#replay-safety)). |
@@ -224,6 +228,32 @@ Decisions made after the seed-3 regression (see Results):
 16. **A task-word rule is trusted only on tasks like those that support it.** Support alone can be reached by chance: at seed 3 the first 5 delete tasks all named `src/` paths and no typo task had yet, so `task~src → git rm` was proven when the first `src/` typo task arrived. Each task-word rule now stores the task-word sets of its supporting examples (distinct, the most recent 40). T1 replays on it only if the task's best Jaccard similarity to one of them is at least `task_rule_similarity` (default 0.5; 0 turns the gate off). Otherwise the step goes to T2 with reason `unproven_rule`, and the model's pick becomes an example, so each new kind of task costs one small call, once. The stored sets keep only the words that at least two supporting examples share, while the task keeps all of its own. A word seen in one example only (a file name, a typo word, a version) says nothing about the kind of task, and with those words kept, every typo task with a new typo looked new: in read-only mode that cost 0.033 extra small calls per task instead of 0.023. Cutting the task's words the same way made the gate too lenient, and it missed seed 3 task 13, since the words that mark a new kind of task (`correct`, `ship`) are exactly the ones no example has. Observation predicates (`err==false`, `json.status=="pending"`, `obs~line`) get no such gate: they test the state the choice depends on, and similarity over the rest of an observation (file contents, order details) would call almost every input new. Over seeds 0–5 with edges approved, observation rules made 1,257 T1 replays (1,076 on features, 181 on `obs~line`), and none of them was in a failed run.
 17. **Failures count per kind of task, not per rule.** A task-word rule also stores the task-word sets of the inputs it replayed into failed runs (`nx`, leaving out any set that also supports it, since the same words then both passed and failed). T1 needs the task to be more similar to a supporting example than to any of them. Before, the negatives of decision 12 were pooled per rule: after N passing replays on one kind of task, a second kind that shares the rule's word needed about N/4 failed runs before the excess showed, and the demotion then also sent the first kind to T2. Now, with N = 20, the second kind fails once and the first kind keeps T1 (`test_failures_count_per_input_class_not_per_rule`; it failed 6 times before). The pooled excess still applies, for failures that task words can't separate. `excess_negatives` also no longer returns float residue (`1 − 0.2·5` was 2.2e-16, not 0).
 
+### Runs and episodes
+
+An **episode** is one task: every turn of a conversation since the last task boundary (`dialects.episode_of`, the same rules for Anthropic and OpenAI chat). The task is the episode's first user text. A later user turn either continues the episode or starts a new one:
+
+- **Continues, as a `steer` step**, when the user cut in while the agent was working: text next to tool results, an interrupt (`[Request interrupted by user…]`, the marker itself dropped), or a user message with no finished agent turn since the previous one.
+- **Continues, as a `yes` / `no` / `text` step**, when the agent's turn ended by asking something: a question that isn't a generic closer ("anything else?") or a confirmation prompt (`(yes/no)`, "shall I", "do you want", "confirm"). `yes` and `no` are bare confirmations and refusals ("Yes, please proceed with the cancellation." is `yes`; "yes, but only #W2" is `text`). A bare "ok" or "no thanks" after a turn that asked nothing also continues, as `text`.
+- **Starts a new episode** otherwise: a new request after the agent finished without asking. Claude Code's pattern, one conversation with several prompts, is several episodes. Consecutive user messages count as one turn, and Claude Code's local slash-command transcripts (`<command-name>`, `<local-command-stdout>`) are dropped from the text.
+
+`episode_mode` (config) or the `X-TreeJIT-Episode` request header overrides this: `conversation` makes the whole conversation one episode (tau-bench: one task, many user turns), `turn` makes every user message a new one (the behaviour before multi-turn episodes).
+
+A **user step** is a pseudo-call `$user:<kind>` whose observation is the user's text. Recognition gives it an edge like any call, so "after the user said yes" is a context, and the step after it is learned there. Bindings (`$obs[-1]`, an email the user typed) and features read it like any observation. The builder never makes it a choice: no user edge is ever replayable, so replay never produces a user turn. When the user answers a finished agent turn (`yes`/`no`/`text`), the agent's text reply before it is END evidence at that context: the model chose to stop and ask there, so that request goes to the model, as the final answer does. `yes` and `no` are different edges, so a write learned after "yes" is never proposed after "no". A T0 write after a `yes` still needs approval like any write, and a commit point also needs `promote_runs + 1` passing runs (`tests/test_episodes.py` replays `cancel_pending_order` after "yes" under `approve '*'`).
+
+A **run** is one episode of one conversation. Its id is, in priority order:
+
+1. `X-TreeJIT-Run: H`: `H`, or `H.<task hash>` for another task under the same header.
+2. A harness session id: Claude Code's `metadata.user_id` (`…_session_<uuid>`, or a JSON object with `session_id`; parsed defensively), the `X-Claude-Code-Session-Id` header, or OpenAI's `prompt_cache_key`. The id is `r_` + hash(family, session, first user text, episode index, task hash), known from the episode's first request.
+3. Otherwise hash(family, first user text of the conversation, the conversation's first assistant turn, episode index, task hash). The first assistant turn is its tool-call ids, or its text when it made no call. Weak ids (`call_0`, `toolu_01`, short or counter-like, `model.weak_call_id`) are salted with the first observation. So a conversation's first request gets its run id when its response arrives, or, with weak ids, one request later, when treejit fills in the rows that waited. OpenAI's `user` is mixed in but never names a run alone: it identifies a person, not a conversation.
+
+Two rules keep conversations from merging. A run whose recorded steps the conversation doesn't continue (different call ids at its first or last step, or more steps than the request has) is someone else's, so the next id is tried (`<id>.2`, `.3`, …). And **a run with an outcome is never extended.** A conversation that goes on after its outcome (a Stop hook reported after the agent asked a question, then the user said "yes") continues in a fork `<id>.2`. The fork holds the whole episode, but the steps it copied (`runs.inherited`) are context only: they were counted in the run they came from. An outcome posted for `H` also reaches its forks that have none yet.
+
+Decisions made while adding them (T2, M1 and E4 in `PLAN.md`):
+
+21. **User turns are context, never choices.** Making the user's reply an edge lets the tree condition on it with the machinery it already has (root paths, n-grams, guards, bindings). Keeping it out of the choices keeps replay from speaking for the user, and turns the question before it into the END evidence it is.
+22. **The boundary is decided by the agent's last turn, not by the user's words.** Whether the agent asked something is visible, and it is what makes a reply a reply. Short-reply heuristics alone would have merged "now write tests" into the previous task, and a question heuristic alone would have split "yes" after "I can also commit this." The heuristic is stateless (every request re-parses the whole history the same way), and the header or `episode_mode` overrides it where the harness knows better.
+23. **Identify the conversation, then the task in it.** The first call id alone merged conversations whose backend numbers calls (`repro/T2_out.txt`: three conversations and a later `rm -rf build` in one run marked pass). Session id or first turn, then episode index, then task hash, with the continuation check and forks as a backstop, keeps each id stable across the requests of one episode and distinct across conversations.
+
 ### Frontier prefix compaction (opt-in)
 
 With `compact = true` (`TREEJIT_COMPACT=1`), a request that goes to the model (T4) is forwarded with the raw observations of *verified replayed steps* replaced by a short deterministic digest. Only the forwarded copy changes. The harness's own history, and the trace treejit records, keep the full text. The code is in `compaction.py`, called from the forward path of `engine.handle`.
@@ -282,7 +312,8 @@ Each forwarded request records `compacted N obs/C chars` in its note and the cha
 - **Compaction and the prompt cache.** The keep-last window moves as the conversation grows. The step that leaves it changes from full to compacted once, which invalidates the cache from that message on. A chunked boundary (advancing the window only every few steps) would trade a little compaction for longer cache hits; it isn't implemented.
 - **Commit-point coverage is a list, not a proof.** Programs outside the categories in [Replay safety](#replay-safety) (`cp`, `rm`, `docker build`, `pip install`, an unknown CLI) are writes, not commit points, so an approved edge replays them after `promote_runs` passing runs. Commands the shell builds at run time from data we don't see (a function or alias defined in an earlier call, `$(cat cmd.txt)` inside a script file, a Makefile target that pushes) are only caught when the call itself shows an opaque executor. Tools with their own exec hooks (`sed` `e`, `vim -c`, `git difftool`, repo-configured `pre-commit`) are writes, not commit points.
 - **Repository taint sees calls, not the disk.** It catches writes to git metadata and config that a call names. A `git pull`/`checkout`/`apply` that brings in a `.gitattributes` or an embedded bare repository, a `cp -r` of a bare repository under another name, or a file tool writing a bare repository's `config` doesn't taint the run: that is the trusted-checkout assumption (see `trust_repo_config`). A `cd` in an earlier call isn't tracked either.
-- **Run identity.** Without an `X-TreeJIT-Run` header, run ids are derived from the task and first tool-call id. Resuming the same task text in a new conversation starts a new run.
+- **Run identity.** Without a header or a session id, a run is named from the conversation's first user text and first assistant turn. Two conversations that are identical up to the current step (same text, same call ids, same observations) share a run until they diverge, and then the later one continues in a fork. That takes weak call ids or a text-only first answer. A harness that clears old tool results (Claude Code's context editing) changes the salt of weak ids, which starts a new run. `/compact` replaces the history, so the conversation after it is a new conversation to treejit, with a new root path. A session id alone doesn't survive it either, since the key includes the first user text. A request row whose conversation never sends another request after a weak-id first response keeps `run_id` NULL. The deferral is kept in memory, so a restart between the two requests has the same effect.
+- **Episode boundaries are a heuristic.** A new task typed after the agent asked a question ("Want me to open a PR?" / "No. Now fix the login bug") continues the episode as a `text` step, and a follow-up request after a turn that asked nothing ("now also handle the error case") starts a new episode, whose root path starts fresh. Set `X-TreeJIT-Episode` or `episode_mode` when the harness knows where tasks begin. The agent's own text isn't part of the context, so an acknowledgement "yes" (after a turn that asked nothing) is recorded as `text`, not `yes`. `show` and `export` draw the root path only down to a user step; the nodes after it appear under the macros.
 
 ## Development
 

@@ -45,6 +45,8 @@ class Config:
     purity: float = 0.8            # min share of evidence a child needs to be chosen
     task_rule_support: int = 5     # model-chosen examples a task-word branch rule needs before T1 replays on it
     task_rule_similarity: float = 0.5  # ...and the task's best Jaccard similarity to one of them (0 = off)
+    # episodes: when a later user turn in a conversation starts a new task (see dialects.episode_of)
+    episode_mode: str = "auto"     # auto | conversation (one task per conversation) | turn (every user message)
     # replay bounds
     theta: float = 0.5             # confidence budget: product of edge confidences must stay above
     hard_cap: int = 8              # K: max consecutive replayed steps

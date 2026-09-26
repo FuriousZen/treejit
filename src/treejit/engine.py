@@ -20,14 +20,18 @@ from . import compaction, dialects, families, subcalls
 from .builder import build_family
 from .config import Config
 from .dialects import Dialect
-from .model import Episode, NormRequest, ResponseInfo, ToolCall
+from .model import Episode, NormRequest, ResponseInfo, ToolCall, weak_call_id
 from .replay import Plan, decide, hints, materialize
 from .store import Store, dumps
 from .tree import TreeView
 from .util import h
 
 RUN_HEADER = "x-treejit-run"
+EPISODE_HEADER = "x-treejit-episode"            # auto | conversation | turn (see dialects.episode_of)
+SESSION_HEADERS = ("x-claude-code-session-id",)  # harness session ids sent as headers
 TRUNCATED = ("max_tokens", "length", "pause_turn", "content_filter", "refusal")  # stops that don't end a task
+MAX_FORKS = 64
+MAX_DEFERRED = 4096
 
 
 @dataclass
@@ -39,6 +43,9 @@ class _Pending:
     run_id: str | None
     started: float
     n_steps: int = -1                 # steps in the episode when forwarded (to record where the model ended it)
+    sub_request_id: int | None = None  # the failed T2/T3 subcall this forward replaces: it joins the run too
+    ep: Episode | None = None         # for deriving the run id once the response is known
+    hdrs: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -70,6 +77,9 @@ class TreeJIT:
             self.cfg.db = db
         self.store = Store(self.cfg.db)
         self._views: dict[str, TreeView] = {}
+        # request rows waiting for a run id: conversations whose first call id is weak (`call_0`) get
+        # their run id from the first observation, one request later (see _conv_key)
+        self._deferred: dict[str, list[tuple[list[int], int, str, str]]] = {}
 
     # ------------------------------------------------------------------ tree
     def view(self, family: str) -> TreeView:
@@ -96,7 +106,8 @@ class TreeJIT:
         t0 = time.perf_counter()
         d = dialects.get(dialect)
         hdrs = {k.lower(): v for k, v in (headers or {}).items()}
-        req = d.parse_request(body)
+        mode = str(hdrs.get(EPISODE_HEADER) or self.cfg.episode_mode).strip().lower()
+        req = d.parse_request(body, mode=mode)
         if not req.tools:
             rid = self.store.log_request(dialect=dialect, tier="pass", note="no_tools")
             return Result("forward", body, req.stream, ctx=_Pending(rid, None, "", "", None, t0))
@@ -104,9 +115,11 @@ class TreeJIT:
         fam = families.resolve(self.store, req.system, req.tools, dialect)
         ep = req.episode
         task_hash = h(ep.task)
-        run_id = self._run_id(hdrs, fam, ep, task_hash)
+        run_id, inherited = self._run_id(hdrs, fam, ep, task_hash)
+        if run_id and self._deferred:
+            self._settle(fam, ep, run_id, task_hash)
         if run_id and ep.steps:
-            self._record(run_id, fam, ep, task_hash)
+            self._record(run_id, fam, ep, task_hash, inherited)
 
         view = self.view(fam)
         plan = decide(view, self.cfg, req, d)
@@ -118,10 +131,12 @@ class TreeJIT:
                 sub = plan.sub
                 labels = " | ".join(o.edge.label for o in sub.options)
                 rid = self.store.log_request(family=fam, run_id=run_id, dialect=dialect, tier=sub.tier, node=sub.node,
+                                             at_step=len(ep.steps),
                                              note=f"{sub.reason}@{sub.used}: {labels}"[:500])
                 return Result("subcall", sub_body, req.stream, None, run_id, sub.tier, plan, self._headers(run_id, sub.tier),
-                              _Sub(rid, fam, ep.task, task_hash, run_id, t0, len(ep.steps), req, view, plan))
-        return self._forward(d, req, view, plan, fam, ep.task, task_hash, run_id, t0)
+                              _Sub(rid, fam, ep.task, task_hash, run_id, t0, len(ep.steps), ep=ep, hdrs=hdrs,
+                                   req=req, view=view, plan=plan))
+        return self._forward(d, req, view, plan, fam, ep.task, task_hash, run_id, t0, hdrs=hdrs)
 
     def resume(self, result: Result, response: dict | None, status: int = 200, latency_ms: float | None = None) -> Result:
         """Finish a T2/T3 subcall: `response` is the upstream JSON (None on transport failure).
@@ -153,7 +168,8 @@ class TreeJIT:
         if call is None:
             self.store.update_request(ctx.request_id, note=f"{note}; failed:{why}"[:500], **kw)
             plan.reason = f"{sub.tier}_failed:{why}"
-            return self._forward(d, req, ctx.view, plan, ctx.family, ctx.task, ctx.task_hash, ctx.run_id, ctx.started)
+            return self._forward(d, req, ctx.view, plan, ctx.family, ctx.task, ctx.task_hash, ctx.run_id, ctx.started,
+                                 sub_rid=ctx.request_id, hdrs=ctx.hdrs)
         plan.calls, plan.nodes, plan.tier, plan.reason = [call], [sub.node], sub.tier, ""
         plan.detail.append(f"{sub.tier}@{sub.used} {label} ({sub.reason})")
         res = self._replay(d, req, ctx.family, ctx.task, ctx.task_hash, ctx.run_id, plan, ctx.started, log=False)
@@ -164,8 +180,12 @@ class TreeJIT:
     def _replay(self, d: Dialect, req: NormRequest, fam: str, task: str, task_hash: str, run_id: str | None,
                 plan: Plan, t0: float, log: bool = True) -> Result:
         if run_id is None:
-            run_id = "r_" + h(fam, task_hash, plan.calls[0].id)
-            self.store.upsert_run(run_id, fam, task, task_hash)
+            # the conversation's first assistant turn is this replay (its ids are ours, never weak)
+            ep = req.episode
+            anchor = ([c.id for c in plan.calls], "", None) if ep.anchor_ids is None else None
+            run_id, inherited = self._run_id({}, fam, ep, task_hash, anchor)
+            if run_id:
+                self.store.upsert_run(run_id, fam, task, task_hash, inherited)
         for nid in plan.nodes:
             self.store.hit(nid)
         if req.stream:
@@ -175,12 +195,13 @@ class TreeJIT:
         if log:
             ms = (time.perf_counter() - t0) * 1000
             self.store.log_request(family=fam, run_id=run_id, dialect=d.name, tier=plan.tier, node=plan.nodes[0],
+                                   at_step=len(req.episode.steps),
                                    n_calls=len(plan.calls), latency_ms=ms, status=200,
                                    call_ids=json.dumps([c.id for c in plan.calls]), note="; ".join(plan.detail)[:500])
         return Result("replay", resp, req.stream, sse, run_id, plan.tier, plan, self._headers(run_id, plan.tier))
 
     def _forward(self, d: Dialect, req: NormRequest, view: TreeView, plan: Plan, fam: str, task: str, task_hash: str,
-                 run_id: str | None, t0: float) -> Result:
+                 run_id: str | None, t0: float, sub_rid: int | None = None, hdrs: dict | None = None) -> Result:
         fwd = d.prepare_forward(req)
         comp = compaction.apply(self.store, view, self.cfg, req, fwd) if self.cfg.compact else None
         if comp is not None:
@@ -194,9 +215,10 @@ class TreeJIT:
         if comp is not None and comp.n:
             note += "; " + comp.note
         rid = self.store.log_request(family=fam, run_id=run_id, dialect=d.name, tier="T4", node=plan.node, note=note[:500],
+                                     at_step=len(req.episode.steps),
                                      compacted_chars=comp.chars if comp is not None else 0)
         return Result("forward", fwd, req.stream, None, run_id, "T4", plan, self._headers(run_id, "T4"),
-                      _Pending(rid, fam, task, task_hash, run_id, t0, len(req.episode.steps)))
+                      _Pending(rid, fam, task, task_hash, run_id, t0, len(req.episode.steps), sub_rid, req.episode, hdrs or {}))
 
     def complete(self, result: Result, info: ResponseInfo | None, status: int = 200, latency_ms: float | None = None) -> None:
         """Record usage/latency of a forwarded request once the upstream response is known."""
@@ -204,10 +226,22 @@ class TreeJIT:
         if ctx is None or result.kind != "forward":
             return
         run_id = ctx.run_id
-        if run_id is None and ctx.family and info is not None and info.calls and status < 400:
-            run_id = "r_" + h(ctx.family, ctx.task_hash, info.calls[0].id)
-            self.store.upsert_run(run_id, ctx.family, ctx.task, ctx.task_hash)
-            result.run_id = run_id
+        if run_id is None and ctx.family and ctx.ep is not None and info is not None and status < 400:
+            ep = ctx.ep
+            # this response is the conversation's first assistant turn: it anchors the conversation
+            anchor = ([c.id for c in info.calls], " ".join(info.text.split()), None) if ep.anchor_ids is None else None
+            run_id, inherited = self._run_id(ctx.hdrs, ctx.family, ep, ctx.task_hash, anchor)
+            if run_id:
+                self.store.upsert_run(run_id, ctx.family, ctx.task, ctx.task_hash, inherited)
+                result.run_id = run_id
+            else:  # weak call ids: the run id needs the first observation; the next request settles these rows
+                ids = anchor[0] if anchor is not None else (ep.anchor_ids or [])
+                if len(self._deferred) >= MAX_DEFERRED:
+                    self._deferred.pop(next(iter(self._deferred)))
+                self._deferred.setdefault(self._defer_key(ctx.family, ep, ids), []).append(
+                    ([ctx.request_id] + ([ctx.sub_request_id] if ctx.sub_request_id else []), ep.index, ctx.task, ctx.task_hash))
+        if run_id and ctx.sub_request_id:
+            self.store.update_request(ctx.sub_request_id, run_id=run_id)
         ms = latency_ms if latency_ms is not None else (time.perf_counter() - ctx.started) * 1000
         kw: dict[str, Any] = {"status": status, "latency_ms": ms, "run_id": run_id}
         if info is not None:
@@ -235,21 +269,98 @@ class TreeJIT:
         return ids
 
     # ------------------------------------------------------------------ helpers
-    def _run_id(self, hdrs: dict, fam: str, ep: Episode, task_hash: str) -> str | None:
+    # Run identity. A run is one episode (one task) of one conversation:
+    #   base = X-TreeJIT-Run header (the header names the run; another task under it gets `.<task hash>`)
+    #        | r_ + h(conversation key, episode index, task hash)
+    # and the conversation key is, in priority order: a harness session id (Claude Code's
+    # metadata.user_id / x-claude-code-session-id, OpenAI prompt_cache_key) with the conversation's first
+    # user text; else the first user text plus the conversation's first assistant turn (its tool-call ids;
+    # weak ids like `call_0` are salted with the first observation; a text-only turn by its text).
+    # _pick then never extends a run that has an outcome (it forks `<base>.2`, `.3`, ... inheriting the
+    # finished prefix) nor one whose recorded steps this conversation doesn't continue (another conversation
+    # that collided on the same base).
+    def _run_id(self, hdrs: dict, fam: str, ep: Episode, task_hash: str,
+                anchor: tuple[list[str], str, str | None] | None = None) -> tuple[str | None, int]:
+        """(run id, steps inherited from a finished run it forks), or (None, 0) when the conversation
+        can't be identified yet (no assistant turn so far, or weak call ids without an observation)."""
         hdr = hdrs.get(RUN_HEADER)
         if hdr:
             row = self.store.run(hdr)
-            if row is None or row["task_hash"] == task_hash:
-                return hdr
-            return f"{hdr}.{task_hash[:8]}"
-        if ep.steps:
-            return "r_" + h(fam, task_hash, ep.steps[0].call.id)
-        return None
+            base = hdr if row is None or row["task_hash"] == task_hash else f"{hdr}.{task_hash[:8]}"
+        else:
+            key = self._conv_key(hdrs, fam, ep, anchor)
+            if key is None:
+                return None, 0
+            base = "r_" + h(key, ep.index, task_hash)
+        return self._pick(base, ep)
 
-    def _record(self, run_id: str, fam: str, ep: Episode, task_hash: str) -> None:
+    @staticmethod
+    def _conv_key(hdrs: dict, fam: str, ep: Episode, anchor: tuple | None = None) -> str | None:
+        session = next((str(hdrs[k]) for k in SESSION_HEADERS if hdrs.get(k)), "") or ep.session
+        if session:
+            return h("session", fam, session, ep.origin)
+        ids, text, salt = (ep.anchor_ids, ep.anchor_text, ep.anchor_salt) if anchor is None else anchor
+        if ids is None:
+            return None
+        if ids and any(weak_call_id(i) for i in ids):
+            if salt is None:
+                return None
+            first = ["weak", ids, salt]
+        else:
+            first = ["ids", ids] if ids else ["text", h(text)]
+        return h("conv", fam, ep.origin, ep.user, first)
+
+    @staticmethod
+    def _defer_key(fam: str, ep: Episode, ids: list[str]) -> str:
+        return h("defer", fam, ep.origin, ep.user, ids)
+
+    def _pick(self, base: str, ep: Episode) -> tuple[str, int]:
+        inherited = 0
+        rid = base
+        for n in range(1, MAX_FORKS + 1):
+            rid = base if n == 1 else f"{base}.{n}"
+            row = self.store.run(rid)
+            if row is None:
+                return rid, inherited
+            same = self._continues(row, ep)
+            if row["outcome"] is None:
+                if same:
+                    return rid, 0
+            elif same:
+                inherited = max(inherited, int(row["n_steps"] or 0))
+        return rid, inherited
+
+    def _continues(self, row: Any, ep: Episode) -> bool:
+        """Is `ep` a continuation of the run's recorded steps (same call ids at its first and last step)?"""
+        n = int(row["n_steps"] or 0)
+        if n > len(ep.steps):
+            return False
+        if n == 0:
+            return True
+        got = self.store.q("SELECT idx, call_id FROM steps WHERE run_id=? AND idx IN (0, ?)", (row["id"], n - 1))
+        return all(ep.steps[r["idx"]].call.id == r["call_id"] for r in got)
+
+    def _settle(self, fam: str, ep: Episode, run_id: str, task_hash: str) -> None:
+        """Give deferred request rows of this conversation their run id (see complete())."""
+        if not ep.anchor_ids:
+            return
+        entries = self._deferred.pop(self._defer_key(fam, ep, ep.anchor_ids), None)
+        for rids, index, task, th in entries or []:
+            rid = run_id
+            if (index, th) != (ep.index, task_hash):
+                key = self._conv_key({}, fam, ep)
+                if key is None:
+                    continue
+                rid = "r_" + h(key, index, th)
+                self.store.upsert_run(rid, fam, task, th)
+            self.store.x(f"UPDATE requests SET run_id=? WHERE run_id IS NULL AND id IN ({','.join('?' * len(rids))})",
+                         (rid, *rids))
+
+    def _record(self, run_id: str, fam: str, ep: Episode, task_hash: str, inherited: int = 0) -> None:
         """Log the episode's steps. A T2 pick counts as a model choice (the model chose among
-        known children), so it is recorded as not replayed and feeds purity and decision lists."""
-        self.store.upsert_run(run_id, fam, ep.task, task_hash)
+        known children), so it is recorded as not replayed and feeds purity and decision lists.
+        User steps are recorded like calls (tool `$user:<kind>`, the text as observation)."""
+        self.store.upsert_run(run_id, fam, ep.task, task_hash, inherited)
         start = max(0, self.store.n_steps(run_id) - 1)
         rows = []
         for i in range(start, len(ep.steps)):

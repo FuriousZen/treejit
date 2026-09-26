@@ -8,6 +8,7 @@ from collections import defaultdict
 from typing import Any, TextIO
 
 from .config import Config
+from .model import Step, ToolCall, is_user
 from .store import Store
 from .util import now, short
 
@@ -198,8 +199,19 @@ def latest_run(store: Store) -> str | None:
     return r["id"] if r else None
 
 
+SMALL = ("T2", "T3")                       # tiers logged for small (subcall) requests
+VIA = {"t2": "T2", "ck": "ck", "t3": "T3"}  # replayed call-id suffix -> label (model.Step.replayed_via)
+
+
+def _via(cid: str) -> str:
+    return VIA.get(Step(ToolCall(cid, "", {})).replayed_via, "")
+
+
 def explain(store: Store, run_id: str) -> dict:
-    """Per-step timeline of one run, joined from its steps and its logged requests."""
+    """Per-step timeline of one run, joined from its steps and its logged requests.
+
+    Rows are ordered by the episode position each request decided (`requests.at_step`), so text replies,
+    failed small calls and user turns land between the steps they came between."""
     run = store.run(run_id)
     if run is None:
         raise IdError(f"unknown run {run_id!r}")
@@ -209,6 +221,8 @@ def explain(store: Store, run_id: str) -> dict:
     seen: set[str] = set()
     tiers: dict[str, int] = defaultdict(int)
     tokens = 0
+    small = {"calls": 0, "failed": 0, "tokens": 0}
+    pos = 0
     for q in reqs:
         tier = q["tier"] or "?"
         tiers[tier] += 1
@@ -217,33 +231,70 @@ def explain(store: Store, run_id: str) -> dict:
         ids = json.loads(q["call_ids"] or "[]")
         note = q["note"] or ""
         model = tier in ("T4", "pass")
+        first = steps.get(ids[0]) if ids else None
+        at = q["at_step"] if "at_step" in q.keys() and q["at_step"] is not None else (first["idx"] if first else pos)
+        pos = at
+        if tier in SMALL:
+            small["calls"] += 1
+            small["tokens"] += tok
         who = ("model (after side exit)" if note.startswith("side_exit") else "model") if model else tier
         parts = note.split("; ")
         if not ids:
-            rows.append({"step": None, "request": q["id"], "who": who, "call": "(no tool call: final answer)" if q["status"] in (None, 200)
-                         else f"(status {q['status']})", "note": note, "tokens": tok, "obs": ""})
+            if tier in SMALL:
+                label = "ck" if note.startswith("budget@") else tier
+                if "; failed:" in note:
+                    small["failed"] += 1
+                    why = note.split("; failed:", 1)[1].split(";")[0]
+                    call = f"({label} small call failed: {why} → model)"
+                else:
+                    call = f"({label} small call: no result recorded)"
+                who = label
+            elif q["status"] is None:
+                call = "(no response recorded)"
+            elif q["status"] != 200:
+                call = f"(status {q['status']})"
+            else:
+                call = "(no tool call: final answer)"
+            rows.append({"step": None, "request": q["id"], "at": at, "who": who, "call": call, "note": note, "tokens": tok,
+                         "obs": ""})
             continue
         for j, cid in enumerate(ids):
             st = steps.get(cid)
             seen.add(cid)
+            label = _via(cid) or who
             rows.append({
-                "step": st["idx"] if st else None, "request": q["id"], "who": who,
+                "step": st["idx"] if st else None, "request": q["id"], "at": at, "who": label,
                 "call": compact_call(st["tool"], st["args"]) if st else f"(call {cid} not recorded yet)",
                 "note": parts[j] if not model and len(parts) == len(ids) else note,
                 "tokens": tok if j == 0 else 0, "obs": _first_line(st), "error": bool(st and st["is_error"]),
             })
-    for cid, st in steps.items():  # steps whose request isn't in the log (e.g. an older client)
-        if cid not in seen:
-            rows.append({"step": st["idx"], "request": None, "who": "replay" if st["replayed"] else "?",
-                         "call": compact_call(st["tool"], st["args"]), "note": "", "tokens": 0, "obs": _first_line(st),
-                         "error": bool(st["is_error"])})
-    rows.sort(key=lambda r: (r["request"] is None, r["request"] or 0, r["step"] if r["step"] is not None else 1 << 30))
+    for cid, st in steps.items():  # user turns, and steps whose request isn't in the log (e.g. an older client)
+        if cid in seen:
+            continue
+        if is_user(st["tool"]):
+            kind = st["tool"].split(":", 1)[1] if ":" in st["tool"] else "text"
+            rows.append({"step": st["idx"], "request": None, "at": st["idx"], "who": "user", "call": f"({kind}) " +
+                         short(" ".join((st["obs"] or "").split()), 90), "note": "", "tokens": 0, "obs": "", "error": False})
+            continue
+        rows.append({"step": st["idx"], "request": None, "at": st["idx"], "who": _via(cid) or ("replay" if st["replayed"] else "?"), "call": compact_call(st["tool"], st["args"]), "note": "",
+                     "tokens": 0, "obs": _first_line(st), "error": bool(st["is_error"])})
+    # a request decided position `at`; a user turn recorded at index k sits after the requests that
+    # decided k (the agent's reply it answers) and before those that decided k+1
+    rows.sort(key=lambda r: (r["at"], r["request"] is None, r["request"] or 0,
+                             r["step"] if r["step"] is not None else -1))
+    for k, r in enumerate(rows):  # a text reply the conversation went on after is not the final answer
+        if r["call"] == "(no tool call: final answer)" and any(x["step"] is not None for x in rows[k + 1:]):
+            r["call"] = "(no tool call: replied to the user)"
     n_steps = len(steps)
     replayed = sum(1 for s in steps.values() if s["replayed"])
+    users = sum(1 for s in steps.values() if is_user(s["tool"]))
     return {
         "run": run_id, "family": run["family"], "task": run["task"] or "", "outcome": run["outcome"],
-        "reason": run["reason"], "steps": n_steps, "replayed_calls": replayed, "model_calls": tiers.get("T4", 0) + tiers.get("pass", 0),
-        "tokens": tokens, "requests_by_tier": dict(tiers), "timeline": rows,
+        "reason": run["reason"], "steps": n_steps - users, "user_turns": users, "replayed_calls": replayed,
+        "model_calls": tiers.get("T4", 0) + tiers.get("pass", 0), "small_calls": small["calls"],
+        "small_failed": small["failed"], "small_tokens": small["tokens"], "tokens": tokens,
+        "inherited": run["inherited"] if "inherited" in run.keys() else 0,
+        "requests_by_tier": dict(tiers), "timeline": rows,
     }
 
 
@@ -258,8 +309,12 @@ def explain_text(d: dict) -> str:
     out = [f"run {d['run']}  family={d['family'][:SHORT]}  outcome={d['outcome'] or '-'}"
            + (f" ({d['reason']})" if d["reason"] else ""),
            f"task: {short(d['task'], 100)!r}",
-           f"{d['steps']} tool calls, {d['replayed_calls']} replayed; {d['model_calls']} model call(s), {d['tokens']} tokens; "
+           f"{d['steps']} tool calls, {d['replayed_calls']} replayed"
+           + (f", {d['user_turns']} later user turn(s)" if d.get("user_turns") else "")
+           + (f", first {d['inherited']} step(s) continue an earlier run" if d.get("inherited") else "")
+           + f"; {d['model_calls']} model call(s), {d['tokens']} tokens; "
            "requests by tier: " + " ".join(f"{t}={n}" for t, n in sorted(d["requests_by_tier"].items())),
+           f"small calls: {d.get('small_calls', 0)} ({d.get('small_failed', 0)} failed), {d.get('small_tokens', 0)} tokens",
            ""]
     for r in d["timeline"]:
         idx = f"#{r['step']}" if r["step"] is not None else "  -"
