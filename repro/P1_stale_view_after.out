@@ -1,0 +1,3 @@
+proxy cached view: hot edges = 1 | fresh view from db: hot edges = 1
+model calls for a now-proven task through the running proxy: 1 (a fresh process would replay: 1 = final answer only)
+same task through a freshly started process: 1 model call(s)

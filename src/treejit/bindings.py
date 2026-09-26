@@ -15,10 +15,11 @@ Rules (JSON lists):
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from .features import eval_decision_list, learn_decision_list, obs_features, parse_json, task_words
 from .model import Observation, ToolCall
@@ -66,12 +67,36 @@ def specific(v: str) -> bool:
 # ------------------------------------------------------------ extractors
 
 
-def _lines(t: str) -> list[str]:
-    return [line.strip() for line in t.splitlines() if line.strip()]
+# A rebuild evaluates many candidate rules against the same few observations (and replay the same
+# rules against the same observation). Parsing and scanning a text is done once per text, not once
+# per candidate or per evaluation: every helper below is a pure function of the text, memoized
+# (bounded; texts longer than _MEMO_MAX_CHARS are not kept). Results are tuples/shared: read-only.
+_MEMO_SIZE = 512
+_MEMO_MAX_CHARS = 32 * 1024
 
 
-def _toks(t: str) -> list[str]:
-    return [w for w in (x.strip(_STRIP) for x in t.split()) if w]
+def _per_text(fn: Callable) -> Callable:
+    memo = functools.lru_cache(maxsize=_MEMO_SIZE)(fn)
+
+    @functools.wraps(fn)
+    def get(t: str, *rest: Any) -> Any:
+        return memo(t, *rest) if len(t) <= _MEMO_MAX_CHARS else fn(t, *rest)
+
+    get.cache_clear = memo.cache_clear  # type: ignore[attr-defined]
+    return get
+
+
+@_per_text
+def _lines(t: str) -> tuple[str, ...]:
+    return tuple(line.strip() for line in t.splitlines() if line.strip())
+
+
+@_per_text
+def _toks(t: str) -> tuple[str, ...]:
+    return tuple(w for w in (x.strip(_STRIP) for x in t.split()) if w)
+
+
+_parsed = _per_text(parse_json)
 
 
 def _json_get(js: Any, path: list) -> Any:
@@ -89,10 +114,16 @@ def _json_get(js: Any, path: list) -> Any:
 _MISS = object()
 
 
-def _re_all(name: str, t: str) -> list[str]:
-    return [m.group(m.lastindex) if m.lastindex else m.group(0) for m in PATTERNS[name].finditer(t)]
+def _re_all(name: str, t: str) -> tuple[str, ...]:
+    return _re_matches(t, name)
 
 
+@_per_text
+def _re_matches(t: str, name: str) -> tuple[str, ...]:
+    return tuple(m.group(m.lastindex) if m.lastindex else m.group(0) for m in PATTERNS[name].finditer(t))
+
+
+@functools.lru_cache(maxsize=256)
 def _kv_re(key: str) -> re.Pattern:
     return re.compile(rf"(?im)^[ \t>*-]*{re.escape(key)}[ \t]*[:=][ \t]*(.+?)[ \t]*\.?[ \t]*$")
 
@@ -103,7 +134,7 @@ def extract(t: str, ext: list) -> Val | None:
         v = t.strip()
         return Val(v) if v else None
     if kind == "json":
-        js = parse_json(t)
+        js = _parsed(t)
         if js is None:
             return None
         v = _json_get(js, ext[1])
@@ -187,19 +218,51 @@ def _json_paths(js: Any, target: str, prefix: list | None = None, depth: int = 4
     return out
 
 
+@_per_text
+def _json_index(t: str) -> dict[str, list[tuple]] | None:
+    """{cooked value: paths holding it} for a JSON text, each list in `_json_paths` order (depth-first,
+    at most 4 levels, the first 20 items of a list), or None if `t` isn't JSON. Built once per text:
+    `_json_index(t)[target]` is `_json_paths(parse_json(t), target)` as tuples."""
+    js = _parsed(t)
+    if js is None:
+        return None
+    index: dict[str, list[tuple]] = {}
+
+    def visit(node: Any, path: tuple, depth: int) -> None:
+        if path:
+            index.setdefault(cook(node), []).append(path)
+        if isinstance(node, dict) and depth:
+            for k, v in node.items():
+                visit(v, path + (k,), depth - 1)
+        elif isinstance(node, list) and depth:
+            for i, v in enumerate(node[:20]):
+                visit(v, path + (i,), depth - 1)
+
+    visit(js, (), 4)
+    return index
+
+
+_KV_LINE = re.compile(r"(?im)^[ \t>*-]*([A-Za-z][\w .-]{0,30}?)[ \t]*[:=][ \t]*(.+?)[ \t]*\.?[ \t]*$")
+
+
+@_per_text
+def _kv_pairs(t: str) -> tuple[tuple[str, str], ...]:
+    return tuple((m.group(1).strip(), m.group(2).strip()) for m in _KV_LINE.finditer(t))
+
+
 def _source_candidates(src: Any, t: str, target: str) -> list[list]:
     c: list[list] = []
-    js = parse_json(t)
+    index = _json_index(t)
     if t.strip() == target:
         c.append(["x", src, ["whole"]])
-    if js is not None:
-        for path in _json_paths(js, target)[:3]:
-            c.append(["x", src, ["json", path]])
+    if index is not None:
+        for path in index.get(target, ())[:3]:
+            c.append(["x", src, ["json", list(path)]])
     if target not in t:
         return c
-    for m in re.finditer(r"(?im)^[ \t>*-]*([A-Za-z][\w .-]{0,30}?)[ \t]*[:=][ \t]*(.+?)[ \t]*\.?[ \t]*$", t):
-        if m.group(2).strip() == target:
-            c.append(["x", src, ["kv", m.group(1).strip()]])
+    for key, value in _kv_pairs(t):
+        if value == target:
+            c.append(["x", src, ["kv", key]])
     for name in PATTERNS:
         ms = _re_all(name, t)
         if target in ms:

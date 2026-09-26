@@ -82,9 +82,13 @@ def greedy_gaps(consts: list[tuple[str, bool]], toks: list[Tok]) -> tuple[list[l
 def common_subsequence(seqs: list[list]) -> list:
     common = list(seqs[0])
     for seq in seqs[1:]:
-        sm = difflib.SequenceMatcher(None, common, seq, autojunk=False)
-        common = [x for blk in sm.get_matching_blocks() for x in common[blk.a : blk.a + blk.size]]
+        common = _common_step(common, seq)
     return common
+
+
+def _common_step(common: list, seq: list) -> list:
+    sm = difflib.SequenceMatcher(None, common, seq, autojunk=False)
+    return [x for blk in sm.get_matching_blocks() for x in common[blk.a : blk.a + blk.size]]
 
 
 def unify_tokens(toklists: list[list[Tok]]) -> list[list]:
@@ -116,6 +120,99 @@ def anti_unify(calls: list[ToolCall]) -> dict:
         else:
             tpl["args"][k] = {"k": "v"}
     return tpl
+
+
+class TemplateFold:
+    """`anti_unify` as a resumable left fold, so a rebuild whose instances only grew at the end
+    folds just the new calls. `extend` never mutates: it returns a new fold (safe to share).
+
+    Shell arguments fold their common token subsequence one call at a time, exactly as
+    `common_subsequence` does; the gaps that are non-empty in some call are recomputed over all
+    calls only when that subsequence changed. `extend` returns None where the fold can't follow
+    `anti_unify` (a shell argument that isn't a string in a later call); build from scratch then.
+    """
+
+    __slots__ = ("keys", "first", "sh_vals", "consts", "nonempty", "canon0", "same")
+
+    def __init__(self) -> None:
+        self.keys: list = []                      # identity of each folded call, in order
+        self.first: ToolCall | None = None
+        self.sh_vals: dict[str, list[str]] = {}   # shell arg -> every value, in order
+        self.consts: dict[str, list] = {}         # shell arg -> common token subsequence so far
+        self.nonempty: dict[str, set[int]] = {}   # shell arg -> gap indices non-empty in some call
+        self.canon0: dict[str, str] = {}          # other arg -> canonical form of the first value
+        self.same: dict[str, bool] = {}           # other arg -> every value equals the first so far
+
+    def extend(self, calls: list[ToolCall], keys: list) -> "TemplateFold | None":
+        if not calls:
+            return self
+        new = TemplateFold()
+        new.keys = self.keys + list(keys)
+        new.first = self.first
+        new.sh_vals = {k: list(v) for k, v in self.sh_vals.items()}
+        new.consts = dict(self.consts)
+        new.nonempty = {k: set(v) for k, v in self.nonempty.items()}
+        new.canon0 = dict(self.canon0)
+        new.same = dict(self.same)
+        rest = calls
+        if new.first is None:
+            new.first, rest = calls[0], calls[1:]
+            for k in sorted(new.first.args):
+                v = new.first.args[k]
+                if is_shell_arg(k, v):
+                    new.sh_vals[k] = [v]
+                    new.consts[k] = _tokseq(tokenize(v))
+                    new.nonempty[k] = set()
+                else:
+                    new.canon0[k] = canon(v)
+                    new.same[k] = True
+            fresh_from = 0
+        else:
+            fresh_from = len(self.keys)
+        for k, vals in new.sh_vals.items():
+            old = new.consts[k]
+            common = old
+            added = [c.args.get(k) for c in rest]
+            if any(not isinstance(v, str) for v in added):
+                return None
+            for v in added:
+                common = _common_step(common, _tokseq(tokenize(v)))
+            vals.extend(added)
+            new.consts[k] = common
+            # gaps of calls already folded stay valid while the subsequence is unchanged
+            if fresh_from and common == old:
+                todo = vals[fresh_from:]
+            else:
+                todo, new.nonempty[k] = vals, set()
+            for v in todo:
+                g = greedy_gaps(common, tokenize(v))
+                assert g is not None
+                new.nonempty[k].update(i for i, gap in enumerate(g[0]) if gap)
+        for k in new.canon0:
+            if new.same[k]:
+                new.same[k] = all(canon(c.args.get(k)) == new.canon0[k] for c in rest)
+        return new
+
+    def template(self) -> dict:
+        assert self.first is not None
+        tpl: dict = {"tool": self.first.name, "args": {}}
+        for k in sorted(self.first.args):
+            if k in self.sh_vals:
+                consts, nonempty = self.consts[k], self.nonempty[k]
+                items: list[list] = []
+                j = 0
+                for i in range(len(consts) + 1):
+                    if i in nonempty:
+                        items.append(["v", j])
+                        j += 1
+                    if i < len(consts):
+                        items.append(["c", consts[i][0], consts[i][1]])
+                tpl["args"][k] = {"k": "sh", "items": items}
+            elif self.same[k]:
+                tpl["args"][k] = {"k": "c", "v": self.first.args[k]}
+            else:
+                tpl["args"][k] = {"k": "v"}
+        return tpl
 
 
 # ------------------------------------------------------------ matching

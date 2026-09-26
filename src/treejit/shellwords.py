@@ -9,6 +9,7 @@ and everything else (quoting style, heredocs, `$(...)`, comments) is kept byte-f
 
 from __future__ import annotations
 
+import functools
 import re
 import shlex
 from dataclasses import dataclass
@@ -31,7 +32,22 @@ class Tok:
     op: bool = False
 
 
+# tokenize and command_heads are pure and see the same commands over and over (every rebuild re-reads
+# every step): memoized, bounded, and only for commands short enough to be worth keeping.
+MEMO_SIZE = 8192
+MEMO_MAX_CHARS = 8192
+
+
 def tokenize(s: str) -> list[Tok]:
+    return list(_tokenize_memo(s)) if len(s) <= MEMO_MAX_CHARS else _tokenize(s)
+
+
+@functools.lru_cache(maxsize=MEMO_SIZE)
+def _tokenize_memo(s: str) -> tuple[Tok, ...]:
+    return tuple(_tokenize(s))
+
+
+def _tokenize(s: str) -> list[Tok]:
     toks: list[Tok] = []
     pending_heredocs: list[tuple[str, bool]] = []
     i, n = 0, len(s)
@@ -415,6 +431,15 @@ def command_heads(cmd: str) -> list[str]:
 
     `cd app && git commit -m "x" | cat` -> ["cd", "git commit", "cat"]
     """
+    return list(_heads_memo(cmd)) if len(cmd) <= MEMO_MAX_CHARS else _command_heads(cmd)
+
+
+@functools.lru_cache(maxsize=MEMO_SIZE)
+def _heads_memo(cmd: str) -> tuple[str, ...]:
+    return tuple(_command_heads(cmd))
+
+
+def _command_heads(cmd: str) -> list[str]:
     heads = []
     for seg in segments(tokenize(cmd)):
         words = [t for t in seg if not t.op]

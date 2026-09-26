@@ -11,10 +11,14 @@
 
 from __future__ import annotations
 
+import contextlib
+import gc
 import json
+import logging
+import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterator
 
 from . import compaction, dialects, families, subcalls
 from .builder import build_family
@@ -25,6 +29,8 @@ from .replay import Plan, decide, hints, materialize
 from .store import Store, dumps
 from .tree import TreeView
 from .util import h
+
+log = logging.getLogger("treejit")
 
 RUN_HEADER = "x-treejit-run"
 TRUNCATED = ("max_tokens", "length", "pause_turn", "content_filter", "refusal")  # stops that don't end a task
@@ -69,24 +75,68 @@ class TreeJIT:
         if db is not None:
             self.cfg.db = db
         self.store = Store(self.cfg.db)
-        self._views: dict[str, TreeView] = {}
+        # family -> (view, the family's built_at it was loaded at). One tuple, swapped atomically.
+        self._views: dict[str, tuple[TreeView, float]] = {}
+        self._build_lock = threading.RLock()  # one build at a time per instance (sync and background)
+        self._rebuilder: _Rebuilder | None = None
+        self.rebuild_mode = "sync"
+        self.set_rebuild_mode("sync" if self.cfg.rebuild == "auto" else self.cfg.rebuild)
 
     # ------------------------------------------------------------------ tree
+    def set_rebuild_mode(self, mode: str) -> None:
+        """"sync": outcome() rebuilds before it returns. "background": a worker thread rebuilds
+        (coalescing outcomes per family) and swaps the live view in when done; requests keep the
+        previous view meanwhile. The proxy uses background unless `rebuild = "sync"`."""
+        if mode not in ("sync", "background"):
+            raise ValueError(f"rebuild mode must be sync|background|auto, got {mode!r}")
+        self.rebuild_mode = mode
+        if mode == "background" and self._rebuilder is None:
+            self._rebuilder = _Rebuilder(self)
+
     def view(self, family: str) -> TreeView:
-        row = self.store.q1("SELECT dirty FROM families WHERE id=?", (family,))
+        # one query per request: `dirty` asks for a build, `built_at` says whether the cached view is
+        # stale (another instance or process, e.g. `treejit outcome`, rebuilt the family)
+        row = self.store.q1("SELECT dirty, built_at FROM families WHERE id=?", (family,))
         if row is not None and row["dirty"]:
-            self.rebuild(family)
-        if family not in self._views:
-            self._views[family] = TreeView.load(self.store, family)
-        return self._views[family]
+            rb = self._rebuilder if self.rebuild_mode == "background" else None
+            if rb is None:
+                with self._build_lock:  # another thread may have built it while we waited
+                    again = self.store.q1("SELECT dirty FROM families WHERE id=?", (family,))
+                    if again is not None and again["dirty"]:
+                        self.rebuild(family)
+                row = None
+                if family not in self._views:
+                    self._views[family] = self._load(self.store, family)
+            elif not rb.pending(family):
+                rb.request(family)  # serve the current view meanwhile
+        cached = self._views.get(family)
+        if cached is None or (row is not None and (row["built_at"] or 0.0) != cached[1]):
+            cached = self._load(self.store, family)
+            self._views[family] = cached
+        return cached[0]
+
+    @staticmethod
+    def _load(store: Store, family: str) -> tuple[TreeView, float]:
+        with store.transaction():  # one snapshot: the tables and built_at agree
+            row = store.q1("SELECT built_at FROM families WHERE id=?", (family,))
+            view = TreeView.load(store, family)
+        return view, ((row["built_at"] or 0.0) if row is not None else 0.0)
 
     def rebuild(self, family: str | None = None) -> list[dict]:
+        """Rebuild now, on the calling thread (any mode)."""
         fams = [family] if family else [r["id"] for r in self.store.q("SELECT id FROM families")]
-        out = []
-        for f in fams:
-            out.append(build_family(self.store, self.cfg, f))
-            self._views.pop(f, None)
+        return [self._build(self.store, f) for f in fams]
+
+    def _build(self, store: Store, family: str) -> dict:
+        with self._build_lock, _no_gc():
+            out = build_family(store, self.cfg, family)
+            self._views[family] = self._load(store, family)
         return out
+
+    def wait_rebuilds(self, timeout: float | None = None) -> bool:
+        """Block until the background rebuilds requested so far are done (True) or `timeout` passes."""
+        rb = self._rebuilder
+        return True if rb is None else rb.wait_all(timeout)
 
     def rebuild_dirty(self) -> list[dict]:
         return [r for f in self.store.q("SELECT id FROM families WHERE dirty=1") for r in self.rebuild(f["id"])]
@@ -221,17 +271,26 @@ class TreeJIT:
             # into an END choice at the contexts after the last step (see tree.END).
             self.store.set_ended(run_id, ctx.n_steps)
 
-    def outcome(self, run_id: str, result: str | bool, reason: str | None = None) -> list[str]:
-        """Verifier signal. result: pass|fail (or True/False); 'error' (timeout, 429...) is recorded but ignored."""
+    def outcome(self, run_id: str, result: str | bool, reason: str | None = None, wait: bool = False) -> list[str]:
+        """Verifier signal. result: pass|fail (or True/False); 'error' (timeout, 429...) is recorded but ignored.
+        Rebuilds the run's family: before returning in sync mode; in background mode on the worker
+        (`wait=True` blocks until that build is done)."""
         if isinstance(result, bool):
             result = "pass" if result else "fail"
         result = {"passed": "pass", "success": "pass", "ok": "pass", "failed": "fail", "failure": "fail"}.get(result, result)
         if result not in ("pass", "fail", "error"):
             raise ValueError(f"outcome must be pass|fail|error, got {result!r}")
         ids = self.store.set_outcome(run_id, result, reason)
-        fams = {r["family"] for r in (self.store.run(i) for i in ids) if r is not None}
-        for f in fams:
-            self.rebuild(f)
+        fams = sorted({r["family"] for r in (self.store.run(i) for i in ids) if r is not None})
+        rb = self._rebuilder if self.rebuild_mode == "background" else None
+        if rb is None:
+            for f in fams:
+                self.rebuild(f)
+        else:
+            gens = [(f, rb.request(f)) for f in fams]
+            if wait:
+                for f, g in gens:
+                    rb.wait(f, g)
         return ids
 
     # ------------------------------------------------------------------ helpers
@@ -278,4 +337,108 @@ class TreeJIT:
         return {r["tier"]: {"requests": r["n"], "tool_calls": r["calls"] or 0, "tokens": r["tok"] or 0} for r in rows}
 
     def close(self) -> None:
+        if self._rebuilder is not None:
+            self._rebuilder.stop()
         self.store.close()
+
+
+_gc_lock = threading.Lock()
+_gc_holds = 0
+
+
+@contextlib.contextmanager
+def _no_gc() -> Iterator[None]:
+    """The cyclic GC paused during a build. A build allocates ~10^5 short-lived, acyclic objects
+    (freed by reference counting), so it only triggers full collections that pause every thread
+    for 50-150 ms, stalling the proxy's event loop, and make the build ~25% slower."""
+    global _gc_holds
+    with _gc_lock:
+        if _gc_holds == 0 and not gc.isenabled():
+            _gc_holds = -1  # someone else disabled it: leave it alone
+        if _gc_holds >= 0:
+            _gc_holds += 1
+            gc.disable()
+    try:
+        yield
+    finally:
+        with _gc_lock:
+            if _gc_holds > 0:
+                _gc_holds -= 1
+                if _gc_holds == 0:
+                    gc.enable()
+            elif _gc_holds == -1:
+                _gc_holds = 0
+
+
+class _Rebuilder:
+    """Background rebuilds for one TreeJIT: a single worker thread, coalescing per family.
+
+    Each request bumps the family's wanted generation; the worker builds the family at the newest
+    generation wanted when it starts, so any number of outcomes during a build cost one more build.
+    The worker uses its own SQLite connection (WAL: requests keep reading while it builds) and swaps
+    the family's view in once the build is committed."""
+
+    def __init__(self, jit: TreeJIT) -> None:
+        self.jit = jit
+        self.cv = threading.Condition()
+        self.want: dict[str, int] = {}
+        self.done: dict[str, int] = {}
+        self.thread: threading.Thread | None = None
+        self.stopping = False
+        self.store: Store | None = None
+
+    def pending(self, family: str) -> bool:
+        return self.want.get(family, 0) > self.done.get(family, 0)
+
+    def request(self, family: str) -> int:
+        with self.cv:
+            gen = self.want[family] = self.want.get(family, 0) + 1
+            if self.thread is None or not self.thread.is_alive():
+                self.stopping = False
+                self.thread = threading.Thread(target=self._run, name="treejit-rebuild", daemon=True)
+                self.thread.start()
+            self.cv.notify_all()
+            return gen
+
+    def wait(self, family: str, gen: int, timeout: float | None = None) -> bool:
+        with self.cv:
+            return self.cv.wait_for(lambda: self.done.get(family, 0) >= gen or self.stopping, timeout)
+
+    def wait_all(self, timeout: float | None = None) -> bool:
+        with self.cv:
+            return self.cv.wait_for(lambda: self.stopping or not any(self.pending(f) for f in self.want), timeout)
+
+    def stop(self) -> None:
+        """Finish the build in progress (if any) and end the worker; pending families stay dirty."""
+        with self.cv:
+            self.stopping = True
+            self.cv.notify_all()
+        if self.thread is not None and self.thread is not threading.current_thread():
+            self.thread.join()
+        if self.store is not None:
+            self.store.close()
+            self.store = None
+
+    def _run(self) -> None:
+        while True:
+            with self.cv:
+                self.cv.wait_for(lambda: self.stopping or any(self.pending(f) for f in self.want))
+                if self.stopping:
+                    return
+                family = next(f for f in self.want if self.pending(f))
+                gen = self.want[family]
+            try:
+                self.jit._build(self._store(), family)
+            except Exception:  # the family stays dirty; the next request for it asks again
+                log.exception("treejit: background rebuild of %s failed", family)
+            with self.cv:
+                self.done[family] = max(self.done.get(family, 0), gen)
+                self.cv.notify_all()
+
+    def _store(self) -> Store:
+        main = self.jit.store
+        if main.path == ":memory:":
+            return main  # a single connection; the store lock serializes its users
+        if self.store is None:
+            self.store = Store(main.path)
+        return self.store
