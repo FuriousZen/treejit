@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS not_commit(edge TEXT PRIMARY KEY, ts REAL);
 CREATE TABLE IF NOT EXISTS evictions(node TEXT PRIMARY KEY, ts REAL);
 CREATE TABLE IF NOT EXISTS hits(node TEXT PRIMARY KEY, hits INTEGER, last_hit REAL);
 CREATE TABLE IF NOT EXISTS compactions(call_id TEXT PRIMARY KEY, obs_hash TEXT, digest TEXT, saved INTEGER, ts REAL);
+CREATE TABLE IF NOT EXISTS compact_convs(conv TEXT PRIMARY KEY, last_fwd REAL);
 """
 
 OBS_CAP = 64 * 1024
@@ -194,20 +195,44 @@ class Store:
         self.x(f"UPDATE requests SET {sets} WHERE id=?", [*kw.values(), rid])
 
     # -------------------------------------------------------------- compaction (sticky per call id)
-    def compactions(self, call_ids: list[str]) -> dict[str, tuple[str, str]]:
-        """{call_id: (obs_hash, digest)} for call ids compacted by an earlier request."""
-        out: dict[str, tuple[str, str]] = {}
+    def compactions(self, call_ids: list[str]) -> dict[str, tuple[str, str | None]]:
+        """{call_id: (obs_hash, digest)} for call ids an earlier forward decided on.
+        A None digest means the step went upstream in full (first-sight compaction keeps it full)."""
+        out: dict[str, tuple[str, str | None]] = {}
         for i in range(0, len(call_ids), 500):
             chunk = call_ids[i : i + 500]
             for r in self.q(f"SELECT call_id, obs_hash, digest FROM compactions WHERE call_id IN ({','.join('?' * len(chunk))})", chunk):
                 out[r["call_id"]] = (r["obs_hash"], r["digest"])
         return out
 
-    def save_compactions(self, rows: list[tuple]) -> None:
-        """rows: (call_id, obs_hash, digest, saved_chars)"""
+    def save_compactions(self, rows: list[tuple], replace: bool = False) -> None:
+        """rows: (call_id, obs_hash, digest|None, saved_chars). Without `replace` the first decision wins."""
         t = now()
-        self.xmany("INSERT OR IGNORE INTO compactions(call_id, obs_hash, digest, saved, ts) VALUES(?,?,?,?,?)",
+        verb = "INSERT OR REPLACE" if replace else "INSERT OR IGNORE"
+        self.xmany(f"{verb} INTO compactions(call_id, obs_hash, digest, saved, ts) VALUES(?,?,?,?,?)",
                    [(*r, t) for r in rows])
+
+    def touch_conversation(self, conv: str, t: float) -> float | None:
+        """Record a forward of conversation `conv` at time t; return the previous one's time (or None)."""
+        with self.lock:
+            r = self.db.execute("SELECT last_fwd FROM compact_convs WHERE conv=?", (conv,)).fetchone()
+            self.db.execute("INSERT OR REPLACE INTO compact_convs(conv, last_fwd) VALUES(?,?)", (conv, t))
+        return float(r["last_fwd"]) if r is not None else None
+
+    def prune_compactions(self, cutoff: float, dry_run: bool = False) -> int:
+        """Delete compaction rows written before `cutoff` unless one of their call ids is a step of a
+        run updated since (live runs keep theirs; rows of old runs and orphans go). Returns the count."""
+        keep = ("SELECT s.call_id FROM steps s JOIN runs r ON r.id = s.run_id "
+                "WHERE r.updated >= ? AND s.call_id IS NOT NULL")
+        where = f"ts < ? AND call_id NOT IN ({keep})"
+        with self.lock:
+            n = self.db.execute(f"SELECT COUNT(*) FROM compactions WHERE {where}", (cutoff, cutoff)).fetchone()[0]
+            if not dry_run and n:
+                with self.transaction():
+                    self.db.execute(f"DELETE FROM compactions WHERE {where}", (cutoff, cutoff))
+            if not dry_run:
+                self.db.execute("DELETE FROM compact_convs WHERE last_fwd < ?", (cutoff,))
+        return int(n)
 
     # -------------------------------------------------------------- operator state
     def pins(self) -> set[tuple[str, str]]:

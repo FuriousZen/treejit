@@ -1,0 +1,60 @@
+seed=0 tasks=200 bigsys=False
+   mode         success  input tok/task  billed/task   vs off  compacted chars/task traj==off
+   off              200           1,485        1,574    +0.0%                     0 True
+   first_sight      200           1,318        1,367   -13.1%                   611 True
+   window           200           1,297        1,391   -11.6%                   687 True
+seed=1 tasks=200 bigsys=False
+   mode         success  input tok/task  billed/task   vs off  compacted chars/task traj==off
+   off              200           1,495        1,557    +0.0%                     0 True
+   first_sight      200           1,335        1,360   -12.6%                   584 True
+   window           200           1,313        1,385   -11.0%                   665 True
+seed=2 tasks=200 bigsys=False
+   mode         success  input tok/task  billed/task   vs off  compacted chars/task traj==off
+   off              200           1,437        1,528    +0.0%                     0 True
+   first_sight      200           1,268        1,316   -13.9%                   601 True
+   window           200           1,246        1,331   -12.9%                   674 True
+seed=3 tasks=200 bigsys=False
+   mode         success  input tok/task  billed/task   vs off  compacted chars/task traj==off
+   off              199           1,453        1,555    +0.0%                     0 True
+   first_sight      199           1,290        1,351   -13.1%                   595 True
+   window           199           1,281        1,362   -12.4%                   627 True
+seed=4 tasks=200 bigsys=False
+   mode         success  input tok/task  billed/task   vs off  compacted chars/task traj==off
+   off              199           1,527        1,577    +0.0%                     0 True
+   first_sight      199           1,370        1,382   -12.4%                   575 True
+   window           199           1,341        1,413   -10.4%                   680 True
+seed=5 tasks=200 bigsys=False
+   mode         success  input tok/task  billed/task   vs off  compacted chars/task traj==off
+   off              200           1,514        1,591    +0.0%                     0 True
+   first_sight      200           1,333        1,366   -14.2%                   655 True
+   window           200           1,310        1,394   -12.4%                   740 True
+seed=0 tasks=200 bigsys=True
+   mode         success  input tok/task  billed/task   vs off  compacted chars/task traj==off
+   off              200          22,643       23,154    +0.0%                     0 True
+   first_sight      200          22,476       22,948    -0.9%                   611 True
+   window           200          22,455       22,971    -0.8%                   687 True
+seed=1 tasks=200 bigsys=True
+   mode         success  input tok/task  billed/task   vs off  compacted chars/task traj==off
+   off              200          22,991       23,171    +0.0%                     0 True
+   first_sight      200          22,831       22,975    -0.8%                   584 True
+   window           200          22,809       23,000    -0.7%                   665 True
+seed=2 tasks=200 bigsys=True
+   mode         success  input tok/task  billed/task   vs off  compacted chars/task traj==off
+   off              200          22,340       23,083    +0.0%                     0 True
+   first_sight      200          22,171       22,871    -0.9%                   601 True
+   window           200          22,150       22,886    -0.9%                   674 True
+seed=3 tasks=200 bigsys=True
+   mode         success  input tok/task  billed/task   vs off  compacted chars/task traj==off
+   off              199          22,611       23,136    +0.0%                     0 True
+   first_sight      199          22,448       22,932    -0.9%                   595 True
+   window           199          22,439       22,942    -0.8%                   627 True
+seed=4 tasks=200 bigsys=True
+   mode         success  input tok/task  billed/task   vs off  compacted chars/task traj==off
+   off              199          23,277       23,217    +0.0%                     0 True
+   first_sight      199          23,120       23,022    -0.8%                   575 True
+   window           199          23,091       23,053    -0.7%                   680 True
+seed=5 tasks=200 bigsys=True
+   mode         success  input tok/task  billed/task   vs off  compacted chars/task traj==off
+   off              200          22,925       23,197    +0.0%                     0 True
+   first_sight      200          22,745       22,972    -1.0%                   655 True
+   window           200          22,721       23,000    -0.9%                   740 True

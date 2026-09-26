@@ -144,6 +144,11 @@ def cmd_prune(a: argparse.Namespace) -> None:
         for fam in {r["family"] for r in victims}:
             jit.rebuild(fam)
     print(f"{'would evict' if a.dry_run else 'evicted'} {len(victims)} node(s) (idle > {days}d, hits < {min_hits})")
+    # compaction decisions (PLAN C3): rows of runs idle longer than the retention, and orphans
+    cdays = a.compact_days if a.compact_days is not None else jit.cfg.compact_retention_days
+    if cdays > 0:
+        n = jit.store.prune_compactions(now() - cdays * 86400, dry_run=a.dry_run)
+        print(f"{'would remove' if a.dry_run else 'removed'} {n} compaction decision(s) (runs idle > {cdays}d)")
 
 
 def _root(family: str) -> str:
@@ -255,9 +260,10 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_explain)
 
-    s = sub.add_parser("prune", help="evict cold nodes")
+    s = sub.add_parser("prune", help="evict cold nodes and old compaction decisions")
     s.add_argument("--days", type=float)
     s.add_argument("--min-hits", type=int)
+    s.add_argument("--compact-days", type=float, help="compaction retention (default: compact_retention_days; 0 = keep)")
     s.add_argument("--dry-run", action="store_true")
     s.set_defaults(fn=cmd_prune)
 
