@@ -9,3 +9,4 @@ dist/
 *.db-shm
 bench_out/
 .venv/
+.claude/worktrees/
