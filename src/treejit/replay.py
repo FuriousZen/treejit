@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from .bindings import Sources, eval_rule
 from .config import Config
 from .dialects import Dialect
-from .features import eval_decision_list, guard_holds, obs_features, task_words
+from .features import eval_decision_list, guard_holds, obs_features, rule_resembles, task_words
 from .model import NormRequest, ToolCall
 from .policy import is_commit_point, is_readonly
 from .templates import Val, call_slots, render
@@ -123,6 +123,11 @@ def _choose(view: TreeView, cfg: Config, nid: str, kids: list[NodeEdge], feats: 
                 if leaf.get("support", leaf["n"]) < rule_support(cfg, leaf):
                     # not proven yet: ask (T2) instead of replaying; the model's pick is a
                     # labelled example that confirms the rule or breaks it
+                    return None, "", 0.0, "unproven_rule"
+                if leaf["pred"][0] == "task" and not rule_resembles(leaf, words, cfg.task_rule_similarity):
+                    # proven, but on other inputs: this task resembles none of the rule's supporting
+                    # examples, or resembles one it misrouted more. Same T2 question, asked once per
+                    # new input class, since the pick becomes an example (features.rule_resembles)
                     return None, "", 0.0, "unproven_rule"
                 return ne, "T1", leaf["purity"] * ne.success, ""
             return None, "", 0.0, "branch_not_replayable"

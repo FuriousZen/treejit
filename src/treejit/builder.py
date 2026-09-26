@@ -327,7 +327,7 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
         examples = [example(rd, i, eid) for rd, i, eid in by_node.get(nid, [])[-200:]]
         negatives = [example(rd, i, eid) for rd, i, eid in negs.get(nid, [])[-200:]]
         confirmed = [example(rd, i, eid) for rd, i, eid in confs.get(nid, [])[-200:]] if negatives else []
-        stump = learn_decision_list(examples, cfg.purity, negatives=negatives, confirmed=confirmed) \
+        stump = learn_decision_list(examples, cfg.purity, negatives=negatives, confirmed=confirmed, class_sets=True) \
             if len({e[0] for e in examples}) > 1 else None
         parent = via = None
         if kind == "r" and ctx:
