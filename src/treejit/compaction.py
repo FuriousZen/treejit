@@ -8,42 +8,70 @@ deterministic digest:
     [treejit: replayed & verified step — Bash(python -m pytest -q) → ok, 21 lines, 1001 chars; first line: "…… [ 34%]"; last line: "233 passed, 5 warnings in 6.93s"]
     [output elided by treejit; call the tool again if you need it]
 
-Rules
-  1. eligible: the call id carries the replay marker, the edge is known at the
-     node encoded in the id, the observation satisfies that edge's (non-empty)
-     learned postcondition, and its features show no error;
-  2. the last `compact_keep_last` observations are always sent in full;
+Eligibility (all modes)
+  1. the call id carries the replay marker, the edge is known at the node encoded
+     in the id, the observation satisfies that edge's (non-empty) learned
+     postcondition, and its features show no error;
+  2. the last `compact_keep_last` observations of the request are sent in full;
   3. observations a decision depends on are kept (see `depended_on`):
-       a. every observation a binding rule, guard or decision list of any child
-          of a *current* frontier context reads (["x", ["obs", k], ...], "case",
-          guards/stumps read the last observation);
-       b. every observation a binding rule of an edge *on the path* read to render
-          its step's arguments (the rule of the step's edge at each context of
-          that step, and at the node encoded in a replayed id);
-     "arg" rules read call arguments, which are never compacted;
+       a. "current": every observation a binding rule, guard or decision list of
+          any child of a frontier context reads (["x", ["obs", k], ...], "case",
+          guards/stumps read the last observation). Only matters when
+          `compact_keep_last` < 3, the binding reach;
+       b. "path" (opt-in, `compact_keep_path`): every observation a binding rule of
+          an edge on the path read to render its step's arguments. Off by default:
+          decisions are made on the harness's uncompacted body, so this protects
+          nothing (PLAN C2);
   4. observations shorter than `compact_min_chars` are left alone.
 
-Determinism: the digest is a pure function of (call, observation). Decisions are
-sticky: once a call id has been compacted the digest is stored (keyed by call id +
-observation hash) and reused verbatim on every later request, even if the tree was
-rebuilt in between, so a compacted step never flips back to full and the provider's
-prompt cache keeps the prefix. The only exception is rule 2/3a (the current
-decision needs it), which can only happen if the harness rewinds the conversation
-or `compact_keep_last` is smaller than the binding reach (3).
+When (`compact_mode`)
+  first_sight (default): append-only. A step may be compacted only in the *first*
+      forwarded request that contains it. Once it went upstream in full it stays
+      full, and once compacted it stays compacted, so consecutive forwards of one
+      conversation are byte-identical up to the previous request's last message and
+      the provider's prompt cache keeps the whole prefix. Every decision is stored
+      per call id in `compactions` (a NULL digest = "sent in full"). When no row
+      exists (pruned, another instance, compaction just enabled) the decision is
+      reconstructed from the conversation itself: the first forward that contained
+      step i is the request just before the first model-chosen step after i (or
+      this request), so step i was inside that request's keep-last window iff
+      i >= f - keep. In practice first_sight compacts the replayed steps of a
+      burst (more than `compact_keep_last` steps replayed between two frontier
+      calls) and nothing else.
+  epoch: first_sight, plus a re-compaction when the conversation's cache is cold:
+      if the previous forward of this conversation is older than
+      `compact_epoch_ttl` seconds (the cache entry has expired, so the next
+      request rewrites the whole prefix anyway), the request is compacted as in
+      `window` mode and the result becomes the new sticky state.
+  window: the pre-C1 behaviour. The keep-last window moves with every request and
+      the step that leaves it is compacted, which changes an earlier message on
+      every forward. Fewest raw tokens, but it defeats prompt caching (+123% billed
+      in the C1 model): only for providers without prompt caching.
+
+Determinism: the digest is a pure function of (call, observation) and decisions are
+sticky across tree rebuilds and restarts (keyed by call id + observation hash).
+Steps of earlier episodes of the same conversation (before the last user text
+message) reuse their stored digests too. See tests/cache_model.py for the prompt
+cache cost model these modes were chosen with.
 """
 
 from __future__ import annotations
 
+import bisect
 import json
 from dataclasses import dataclass
 from typing import Any
 
 from .config import Config
+from .dialects import _text_of
 from .features import guard_holds, obs_features, parse_json
-from .model import NormRequest, Observation, ToolCall
+from .model import NormRequest, Observation, Step, ToolCall
 from .store import Store
 from .tree import NodeEdge, TreeView, contexts, node_id
-from .util import h
+from .util import h, now
+
+MODES = ("first_sight", "epoch", "window")
+PRUNE_EVERY = 3600.0   # opportunistic pruning of old compaction rows, at most once an hour per store
 
 HEAD_CHARS = 120
 LABEL_CHARS = 80
@@ -55,10 +83,11 @@ class Compaction:
     body: dict
     n: int = 0          # observations compacted in this request
     chars: int = 0      # characters removed (original minus digest)
+    epoch: bool = False  # epoch mode: this request re-compacted a cold conversation
 
     @property
     def note(self) -> str:
-        return f"compacted {self.n} obs/{self.chars} chars" if self.n else ""
+        return (f"compacted {self.n} obs/{self.chars} chars" + (" (epoch)" if self.epoch else "")) if self.n else ""
 
 
 # ------------------------------------------------------------------ digest
@@ -176,42 +205,120 @@ def _verified(view: TreeView, st: Any, eid: str | None) -> bool:
 # ------------------------------------------------------------------ apply
 
 
-def apply(store: Store, view: TreeView, cfg: Config, req: NormRequest, body: dict) -> Compaction:
-    """Compact a forwarded request body. `body` is not mutated (neither is req.raw)."""
+def apply(store: Store, view: TreeView, cfg: Config, req: NormRequest, body: dict, clock: float | None = None) -> Compaction:
+    """Compact a forwarded request body. `body` is not mutated (neither is req.raw).
+    `clock` overrides the current time (epoch mode and pruning; tests and the cost model)."""
+    t = now() if clock is None else clock
+    maybe_prune(store, cfg, t)
+    mode = cfg.compact_mode
+    if mode not in MODES:
+        raise ValueError(f"compact_mode must be one of {MODES}, got {mode!r}")
     steps = req.episode.steps
     n = len(steps)
     keep = max(0, cfg.compact_keep_last)
-    if n <= keep:
+    results = _results(req, body)
+    ep_ids = {st.call.id for st in steps}
+    cold = False
+    if mode == "epoch":
+        # a conversation is identified by its first tool call id (earlier episodes included). Every
+        # forward refreshes its timestamp, so "cold" means: no forward of it within the cache TTL.
+        conv = next(iter(results), None) or (steps[0].call.id if steps else None)
+        if conv is not None:
+            last = store.touch_conversation(conv, t)
+            cold = last is not None and t - last > cfg.compact_epoch_ttl
+    # tool results of replayed calls from earlier episodes of this conversation (before the last user text)
+    prior = {cid: v for cid, v in results.items() if cid not in ep_ids and Step(ToolCall(cid, "", {})).replayed_node}
+    cand = [i for i, st in enumerate(steps) if st.replayed_node and st.obs is not None]
+    if not cand and not prior:
         return Compaction(body)
-    eids, _ = view.recognize(req.episode)
-    current, path = depended_on(view, cfg, eids, [s.replayed_node for s in steps])
-    sticky = store.compactions([s.call.id for s in steps[: n - keep] if s.replayed_node])
+    rows = store.compactions([steps[i].call.id for i in cand] + list(prior))
     out: dict[str, str] = {}
-    new_rows: dict[str, tuple] = {}
     lens: dict[str, int] = {}
-    for i, st in enumerate(steps[: n - keep]):
-        if i in current or st.obs is None or not st.replayed_node:
-            continue
-        oh = h(st.obs.text, int(st.obs.is_error))
-        prev = sticky.get(st.call.id)
-        if prev is not None and prev[0] == oh:
-            out[st.call.id] = prev[1]
-        elif i not in path and len(st.obs.text) >= cfg.compact_min_chars and _verified(view, st, eids[i]):
-            d = digest(st.call, st.obs, cfg)
-            if len(d) >= len(st.obs.text):
+    # earlier episodes: reuse their stored digests verbatim (never decide anew)
+    for cid, (text, err) in prior.items():
+        r = rows.get(cid)
+        if r is not None and r[1] is not None and r[0] == h(text, int(err)):
+            out[cid], lens[cid] = r[1], len(text)
+    new_rows: dict[str, tuple] = {}
+    if cand:
+        eids, _ = view.recognize(req.episode)
+        replayed = [s.replayed_node for s in steps]
+        deps: dict[int, tuple[set[int], set[int]]] = {}
+
+        def kept_for(i: int, f: int) -> bool:
+            """Rule 3 as seen by the forward of the first f steps."""
+            if f not in deps:
+                deps[f] = depended_on(view, cfg, eids[:f], replayed[:f])
+            current, path = deps[f]
+            return i in current or (cfg.compact_keep_path and i in path)
+
+        fwd_points = [i for i, st in enumerate(steps) if st.replayed_node is None] + [n]
+        for i in cand:
+            st = steps[i]
+            cid, text = st.call.id, st.obs.text
+            oh = h(text, int(st.obs.is_error))
+            prev = rows.get(cid)
+            prev = prev if prev is not None and prev[0] == oh else None
+            if prev is not None and prev[1] is not None and (mode != "window" or not (i >= n - keep or kept_for(i, n))):
+                out[cid], lens[cid] = prev[1], len(text)       # sticky: compacted once, compacted for good
                 continue
-            out[st.call.id] = d
-            new_rows[st.call.id] = (st.call.id, oh, d, len(st.obs.text) - len(d))
-        else:
+            if mode == "window" or cold:
+                f, record = n, cold                           # decide as of this request
+            elif prev is not None:
+                continue                                      # sticky: sent in full once, full for good
+            else:
+                f, record = fwd_points[bisect.bisect_right(fwd_points, i)], True
+            if len(text) < cfg.compact_min_chars:
+                continue                                      # never compacted: no row needed
+            d = None
+            if i < f - keep and not kept_for(i, f) and _verified(view, st, eids[i]):
+                d = digest(st.call, st.obs, cfg)
+                if len(d) >= len(text):
+                    continue
+                out[cid], lens[cid] = d, len(text)
+            if record:
+                new_rows[cid] = (cid, oh, d, len(text) - len(d) if d else 0)
+            elif d is not None:
+                new_rows[cid] = (cid, oh, d, len(text) - len(d))
+    if out:
+        new_body, done = _rewrite(req.dialect, body, out)
+    else:
+        new_body, done = body, set()
+    # a digest counts only if it was actually spliced in (text-only content). In first_sight/epoch a
+    # step whose digest could not be spliced went upstream in full, and that is what gets recorded.
+    save = [r if r[2] is None or cid in done else (cid, r[1], None, 0) for cid, r in new_rows.items()
+            if r[2] is None or cid in done or mode != "window"]
+    if save:
+        store.save_compactions(save, replace=mode == "epoch" or mode == "window")
+    return Compaction(new_body, len(done), sum(lens[c] - len(out[c]) for c in done), cold and bool(done))
+
+
+def maybe_prune(store: Store, cfg: Config, t: float) -> int:
+    """Drop compaction rows older than `compact_retention_days` (at most once per PRUNE_EVERY)."""
+    if cfg.compact_retention_days <= 0 or t < getattr(store, "_compact_prune_at", 0.0):
+        return 0
+    store._compact_prune_at = t + PRUNE_EVERY  # type: ignore[attr-defined]
+    return store.prune_compactions(t - cfg.compact_retention_days * 86400)
+
+
+def _results(req: NormRequest, body: dict) -> dict[str, tuple[str, bool]]:
+    """Every tool result in the body, in order: {call_id: (text, is_error)}."""
+    out: dict[str, tuple[str, bool]] = {}
+    for m in body.get("messages") or []:
+        if not isinstance(m, dict):
             continue
-        lens[st.call.id] = len(st.obs.text)
-    if not out:
-        return Compaction(body)
-    new_body, done = _rewrite(req.dialect, body, out)
-    rows = [r for cid, r in new_rows.items() if cid in done]
-    if rows:
-        store.save_compactions(rows)
-    return Compaction(new_body, len(done), sum(lens[c] - len(out[c]) for c in done))
+        if req.dialect == "openai":
+            cid = m.get("tool_call_id")
+            if m.get("role") == "tool" and isinstance(cid, str):
+                out.setdefault(cid, (_text_of(m.get("content")), False))
+            continue
+        content = m.get("content")
+        if m.get("role") != "user" or not isinstance(content, list):
+            continue
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "tool_result" and isinstance(b.get("tool_use_id"), str):
+                out.setdefault(b["tool_use_id"], (_text_of(b.get("content")), bool(b.get("is_error"))))
+    return out
 
 
 def _text_blocks_only(content: Any) -> bool:

@@ -65,6 +65,10 @@ class Config:
     compact: bool = False
     compact_keep_last: int = 3     # the last N observations always go upstream in full
     compact_min_chars: int = 400   # smaller observations are left alone
+    compact_mode: str = "first_sight"  # first_sight (append-only) | epoch (+ re-compact when cold) | window (legacy)
+    compact_epoch_ttl: float = 300.0   # epoch: re-compact when the conversation's last forward is older (s)
+    compact_keep_path: bool = False    # also keep observations a path edge's bindings read (rule 3b)
+    compact_retention_days: float = 7.0  # compaction decisions of runs idle this long are pruned (0 = never)
     # tool policy
     replay_tools: list = field(default_factory=lambda: list(DEFAULT_REPLAY_TOOLS))
     shell_tools: list = field(default_factory=lambda: list(DEFAULT_SHELL_TOOLS))

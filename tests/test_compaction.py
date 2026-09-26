@@ -1,4 +1,6 @@
-"""Frontier prefix compaction: eligibility, keep-last, dependencies, determinism, dialects."""
+"""Frontier prefix compaction: eligibility, keep-last, dependencies, determinism, dialects; the
+first-sight (append-only) and epoch modes under the prompt-cache cost model (C1); rule 3b opt-in (C2);
+pruning (C3)."""
 
 from __future__ import annotations
 
@@ -7,13 +9,16 @@ import itertools
 import json
 
 import pytest
+from cache_model import PATTERNS, bill, scenario
+from cache_model import append_only as cache_append_only
 from conftest import Model, run_agent
 
-from treejit import TreeJIT
+from treejit import TreeJIT, compaction
 from treejit.compaction import depended_on, digest, obs_reads
 from treejit.config import Config
 from treejit.model import Observation, ToolCall
 from treejit.tree import NodeEdge, TreeView, node_id
+from treejit.util import now
 
 JUNK = "".join(f"?? build/obj/unit_{i:03d}.o\n" for i in range(40))
 DOCS = "\n".join(f"docs/page_{i:02d}.md" for i in range(40))
@@ -120,12 +125,14 @@ def test_verified_replayed_step_is_compacted_and_harness_history_untouched(cjit)
     assert read["content"].startswith("[treejit: replayed & verified step — Read(file_path=\"src/m5.py\") → ok, ")
     assert "\n" in read["content"] and read["content"].count("\n") == 1
     assert read["tool_use_id"] == ids[1] and read["is_error"] is False
-    # step 0 (git status) is big and verified, but the Read's file_path binding read it: kept
-    assert got[ids[0]]["content"] == status(5)
+    # step 0 (git status) is big and verified. The Read's file_path binding read it, but decisions are made
+    # on the harness's full body, so it is compacted too (rule 3b "path" is opt-in, PLAN C2)
+    assert got[ids[0]]["content"].startswith("[treejit: replayed & verified step — Bash(git status --short) → ok, 41 lines")
     # the last 3 observations are always full (ls docs is big but within keep-last)
     assert [got[i]["content"] for i in ids[2:]] == ["31 src/m5.py", DOCS, "/work"]
     row = cjit.store.q1("SELECT note, compacted_chars FROM requests ORDER BY id DESC LIMIT 1")
-    assert "compacted 1 obs/" in row["note"] and row["compacted_chars"] == len(module(5)) - len(read["content"])
+    assert "compacted 2 obs/" in row["note"]
+    assert row["compacted_chars"] == len(module(5)) - len(read["content"]) + len(status(5)) - len(got[ids[0]]["content"])
 
 
 def test_compacted_block_list_keeps_cache_control(cjit):
@@ -181,18 +188,31 @@ def test_min_chars_and_keep_last_knobs(tmp_path):
     jit.close()
 
 
-def test_deterministic_and_monotonic_across_requests(cjit):
-    msgs = replayed_conv(cjit)[:-1]
+def mono_forwards(jit, k=4):
+    """The model keeps working in a replayed conversation: every request is a frontier call.
+    Returns (forwarded message lists, final harness messages)."""
+    msgs = replayed_conv(jit)[:-1]
     counter = itertools.count()
     forwarded = []
-    # the model keeps working in the same conversation: every request is a frontier call
-    for _ in range(4):
-        res = cjit.handle("anthropic", body_of(msgs), {"X-TreeJIT-Run": "mono"})
+    for _ in range(k):
+        res = jit.handle("anthropic", body_of(msgs), {"X-TreeJIT-Run": "mono"})
         assert res.kind == "forward"
         forwarded.append(res.body["messages"])
         cid = f"toolu_model{next(counter):06d}"
         msgs = msgs + [{"role": "assistant", "content": [{"type": "tool_use", "id": cid, "name": "send_email", "input": {"to": "x"}}]},
                        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": cid, "content": "sent " * 200}]}]
+    return forwarded, msgs
+
+
+def append_only_breaks(forwarded):
+    """PLAN C1 acceptance: fwd[i].messages[:len(fwd[i-1].messages)-1] == fwd[i-1].messages[:-1]."""
+    return [i for i in range(1, len(forwarded)) if forwarded[i][: len(forwarded[i - 1]) - 1] != forwarded[i - 1][:-1]]
+
+
+@pytest.mark.parametrize("mode", ["first_sight", "epoch", "window"])
+def test_deterministic_and_monotonic_across_requests(tmp_path, mode):
+    jit = TreeJIT(str(tmp_path / "m.db"), compact=True, theta=0.0, compact_mode=mode)
+    forwarded, msgs = mono_forwards(jit)
     for a, b in zip(forwarded, forwarded[1:]):
         # everything but the newest message of request N is byte-identical in request N+1, or went full -> compacted
         for ma, mb in zip(a[:-1], b):
@@ -209,13 +229,21 @@ def test_deterministic_and_monotonic_across_requests(cjit):
                 assert compacted.setdefault(k, b["content"]) == b["content"]
     ids = [u["id"] for u in uses(msgs)]
     last = results_by_id({"messages": forwarded[-1]})
-    assert last[ids[3]]["content"].startswith("[treejit: replayed & verified step — Bash(ls docs)"), "left the keep-last window"
-    assert last[ids[1]]["content"].startswith("[treejit:") and last[ids[0]]["content"] == status(5)
+    if mode == "window":
+        # the keep-last window moved past `ls docs`, which flips to a digest: an earlier message changes
+        assert last[ids[3]]["content"].startswith("[treejit: replayed & verified step — Bash(ls docs)"), "left the keep-last window"
+        assert append_only_breaks(forwarded) == [2]
+    else:
+        # `ls docs` was inside the keep-last window the first time it went upstream: it stays full for good
+        assert last[ids[3]]["content"] == DOCS
+        assert append_only_breaks(forwarded) == []
+    assert last[ids[1]]["content"].startswith("[treejit:") and last[ids[0]]["content"].startswith("[treejit:")
     assert last[ids[2]]["content"] == "31 src/m5.py" and last[ids[4]]["content"] == "/work"  # small: never compacted
     # a fresh engine on the same DB (e.g. after a restart or a rebuild) reproduces the same bytes
-    cjit.rebuild()
-    again = cjit.handle("anthropic", body_of(msgs[: len(forwarded[-1])]), {"X-TreeJIT-Run": "mono"}).body["messages"]
+    jit.rebuild()
+    again = jit.handle("anthropic", body_of(msgs[: len(forwarded[-1])]), {"X-TreeJIT-Run": "mono"}).body["messages"]
     assert json.dumps(again[:-1]) == json.dumps(forwarded[-1][:-1])
+    jit.close()
 
 
 def test_digest_is_deterministic_and_tells_the_model():
@@ -320,6 +348,201 @@ def test_openai_dialect_compacts_tool_messages(cjit):
     tool_msgs = [m for m in last if m["role"] == "tool"]
     assert len(tool_msgs) == 5 and all("_tj_" in m["tool_call_id"] for m in tool_msgs)
     assert tool_msgs[1]["content"].startswith("[treejit: replayed & verified step — Read(")
-    assert tool_msgs[0]["content"] == status(5)
+    assert tool_msgs[0]["content"].startswith("[treejit: replayed & verified step — Bash(git status --short)")
     # the harness still holds the full observation
     assert [m for m in convs[-1] if m["role"] == "tool"][1]["content"] == module(5)
+
+
+# ---------------------------------------------------------------- C1: first-sight (append-only) and epoch
+
+
+def fresh_ids(msgs):
+    """The same conversation with new call ids (a conversation treejit has not forwarded yet)."""
+    text = json.dumps(msgs)
+    for u in uses(msgs):
+        text = text.replace(u["id"], u["id"][:-4] + "fr" + u["id"][-2:])
+    return json.loads(text)
+
+
+def apply_direct(jit, msgs, **kw):
+    """Run compaction.apply on a body as the T4 forward path would (the engine would replay instead)."""
+    from treejit import dialects, families
+    body = body_of(msgs)
+    req = dialects.get("anthropic").parse_request(body)
+    view = jit.view(families.resolve(jit.store, req.system, req.tools, "anthropic"))
+    return compaction.apply(jit.store, view, jit.cfg, req, dialects.get("anthropic").prepare_forward(req), **kw)
+
+
+def test_first_sight_is_the_default_and_consecutive_forwards_are_append_only():
+    assert Config().compact_mode == "first_sight"
+    for pattern in PATTERNS:
+        fs = [b for _, b in scenario(pattern, "first_sight")]
+        assert cache_append_only(fs) == [], pattern
+        assert cache_append_only([b for _, b in scenario(pattern, None)]) == []
+        # the pre-C1 moving window rewrites an earlier message on (nearly) every forward
+        assert cache_append_only([b for _, b in scenario(pattern, "window")]) != []
+
+
+def test_cost_model_first_sight_never_bills_more_than_compaction_off():
+    for pattern in PATTERNS:
+        for bp in ("harness", "auto"):
+            off = bill(scenario(pattern, None), breakpoints=bp)
+            fs = bill(scenario(pattern, "first_sight"), breakpoints=bp)
+            assert fs.billed <= off.billed + 1e-6, (pattern, bp, fs.billed, off.billed)
+            assert fs.tokens <= off.tokens
+    # the bursty pattern (5 steps replayed between frontier calls) is where first-sight saves
+    assert bill(scenario("bursty", "first_sight")).vs(bill(scenario("bursty", None))) < -0.15
+    # and the moving window is what C1 reported: more billed tokens than no compaction at all
+    assert bill(scenario("dense", "window")).vs(bill(scenario("dense", None))) > 0.5
+
+
+def test_epoch_recompacts_only_when_the_cache_is_cold():
+    warm_fs, warm_ep = scenario("interleaved", "first_sight"), scenario("interleaved", "epoch")
+    assert bill(warm_ep).rows == bill(warm_fs).rows, "with a warm cache, epoch == first_sight"
+    gaps = {6: 600.0}   # 10 minutes before the 7th forward: the 5-minute cache entry has expired
+    off, fs = bill(scenario("interleaved", None, gaps=gaps)), bill(scenario("interleaved", "first_sight", gaps=gaps))
+    ep_bodies = scenario("interleaved", "epoch", gaps=gaps)
+    ep = bill(ep_bodies)
+    assert ep.billed < fs.billed <= off.billed
+    assert cache_append_only([b for _, b in ep_bodies]) == [6], "the prefix changes only at the cold forward"
+    # a longer TTL setting makes the same pause warm: no re-compaction
+    assert bill(scenario("interleaved", "epoch", gaps={6: 200.0})).billed <= fs.billed
+
+
+def test_first_sight_decisions_are_stored_and_reconstructed(tmp_path):
+    jit = TreeJIT(str(tmp_path / "r.db"), compact=True, theta=0.0, batch=False)   # one call per message
+    msgs = fresh_ids(replayed_conv(jit)[:-1])
+    ids = [u["id"] for u in uses(msgs)]
+    # the first forward sees steps 0-1 only: both inside keep-last, recorded as "sent in full" (NULL digest)
+    first = apply_direct(jit, msgs[:5])
+    assert first.n == 0
+    rows = jit.store.compactions(ids)
+    assert rows[ids[0]][1] is None and rows[ids[1]][1] is None
+    # later forwards never compact them, although they left the keep-last window
+    got = results_by_id(apply_direct(jit, msgs).body)
+    assert got[ids[0]]["content"] == status(5) and got[ids[1]]["content"] == module(5)
+    # without rows the same decision is reconstructed from the conversation: only a model-chosen step after
+    # step i proves an earlier forward, and here every step was replayed, so the one forward is this request
+    jit.store.x("DELETE FROM compactions")
+    again = results_by_id(apply_direct(jit, msgs).body)
+    assert again[ids[0]]["content"].startswith("[treejit:") and again[ids[1]]["content"].startswith("[treejit:")
+    jit.close()
+
+
+def test_earlier_episode_digests_are_kept_after_a_new_user_turn(cjit):
+    msgs = replayed_conv(cjit)       # the final forward of this run compacted steps 0 and 1
+    ids = [u["id"] for u in uses(msgs)]
+    follow = msgs + [{"role": "user", "content": "thanks - and now the docs?"}]
+    got = results_by_id(apply_direct(cjit, follow).body)
+    assert got[ids[0]]["content"].startswith("[treejit:") and got[ids[1]]["content"].startswith("[treejit:")
+    assert got[ids[3]]["content"] == DOCS
+
+
+def test_unknown_compact_mode_is_rejected(tmp_path):
+    jit = TreeJIT(str(tmp_path / "u.db"), compact=True, theta=0.0, compact_mode="sometimes")
+    with pytest.raises(ValueError, match="compact_mode"):
+        apply_direct(jit, [{"role": "user", "content": "x"}])
+    jit.close()
+
+
+# ---------------------------------------------------------------- C2: rule 3b is opt-in, 3a stays
+
+
+def policy2(task, hist, body):
+    """git status (big) -> ls docs (big) -> Read the path from the status output (obs[-2]) -> pwd."""
+    path = hist[0][2].split()[1] if hist else None
+    plan = [("Bash", {"command": "git status --short"}), ("Bash", {"command": "ls docs"}), ("Read", {"file_path": path}),
+            ("Bash", {"command": "pwd"})]
+    return plan[len(hist)] if len(hist) < len(plan) else None
+
+
+def train2(jit):
+    model = Model(policy2)
+    client = jit.wrap(model, dialect="anthropic")
+    for i in range(6):
+        msgs = run_agent(lambda b: client(b, extra_headers={"X-TreeJIT-Run": f"p{i}"}), f"inspect {i}", execute(f"inspect {i}"))
+        jit.outcome(f"p{i}", "pass")
+    assert all("_tj_" in u["id"] for u in uses(msgs))
+    return model, msgs
+
+
+def test_keep_last_0_still_keeps_what_a_current_binding_reads(tmp_path):
+    jit = TreeJIT(str(tmp_path / "k0.db"), compact=True, theta=0.0, compact_keep_last=0, batch=False)
+    model, msgs = train2(jit)
+    # the final forward (after pwd): nothing reads the earlier observations any more -> all big ones compacted
+    ids = [u["id"] for u in uses(msgs)]
+    last = results_by_id(model.bodies[-1])
+    assert all(last[i]["content"].startswith("[treejit:") for i in ids[:3]), "keep_last=0, no dependency"
+    # a forward after `ls docs`: the next step's binding reads obs[-2] (the status output): kept (rule 3a)
+    fresh = fresh_ids(msgs)
+    got = results_by_id(apply_direct(jit, fresh[:5]).body)
+    fids = [u["id"] for u in uses(fresh)]
+    assert got[fids[0]]["content"] == status(5), "a current binding reads it"
+    assert got[fids[1]]["content"] == DOCS, "the last observation (guards read it)"
+    jit.close()
+
+
+def test_keep_path_is_opt_in(tmp_path):
+    jit = TreeJIT(str(tmp_path / "kp.db"), compact=True, theta=0.0, compact_keep_path=True)
+    msgs = fresh_ids(replayed_conv(jit)[:-1])
+    ids = [u["id"] for u in uses(msgs)]
+    got = results_by_id(apply_direct(jit, msgs).body)
+    assert got[ids[0]]["content"] == status(5), "the Read's file_path binding read it (rule 3b)"
+    assert got[ids[1]]["content"].startswith("[treejit:")
+    jit.close()
+
+
+# ---------------------------------------------------------------- C3: pruning
+
+
+def test_prune_compactions_keeps_live_runs_and_reforwards_byte_identical(tmp_path):
+    db = str(tmp_path / "p.db")
+    jit = TreeJIT(db, compact=True, theta=0.0)
+    model, convs = train(jit, [f"inspect {i}" for i in range(6)])
+    old_ids = [u["id"] for u in uses(convs[5])]
+    live_ids = [u["id"] for u in uses(convs[4])]
+    assert jit.store.compactions(old_ids)[old_ids[1]][1] is not None
+    before = model.bodies[-1]            # run t5's final forward
+    month = 30 * 86400
+    jit.store.x("UPDATE compactions SET ts = ts - ?", (month,))
+    jit.store.x("UPDATE runs SET updated = updated - ? WHERE id != 't4'", (month,))
+    n = jit.store.prune_compactions(now() - 7 * 86400)
+    assert n > 0
+    assert jit.store.compactions(old_ids) == {}, "rows of a run idle for a month are gone"
+    assert set(jit.store.compactions(live_ids)) >= {live_ids[0], live_ids[1]}, "a live run keeps its rows"
+    # the old conversation comes back: the same bytes go upstream (decisions reconstructed, then stored again)
+    again = apply_direct(jit, convs[5][:-1]).body
+    assert json.dumps(again, sort_keys=True) == json.dumps(before, sort_keys=True)
+    assert json.dumps(apply_direct(jit, convs[5][:-1]).body) == json.dumps(again)
+    jit.close()
+
+
+def test_cli_prune_and_opportunistic_pruning(tmp_path, capsys):
+    from treejit.cli import main as cli
+    db = str(tmp_path / "cp.db")
+    jit = TreeJIT(db, compact=True, theta=0.0)
+    train(jit, [f"inspect {i}" for i in range(6)])
+    total = jit.store.q1("SELECT COUNT(*) n FROM compactions")["n"]
+    assert total > 0
+    jit.store.x("UPDATE compactions SET ts = ts - ?", (10 * 86400,))
+    jit.store.x("UPDATE runs SET updated = updated - ?", (10 * 86400,))
+    jit.close()
+    cli(["--db", db, "prune", "--dry-run"])
+    assert f"would remove {total} compaction decision(s)" in capsys.readouterr().out
+    cli(["--db", db, "prune", "--compact-days", "30"])
+    assert "removed 0 compaction" in capsys.readouterr().out
+    cli(["--db", db, "prune"])                        # compact_retention_days = 7
+    assert f"removed {total} compaction" in capsys.readouterr().out
+    jit = TreeJIT(db, compact=True, theta=0.0)
+    assert jit.store.q1("SELECT COUNT(*) n FROM compactions")["n"] == 0
+    # opportunistic: the forward path prunes at most once an hour
+    jit.store.save_compactions([("toolu_tj_x_ff00", "h", None, 0)])
+    jit.store.x("UPDATE compactions SET ts = ts - ?", (10 * 86400,))
+    assert compaction.maybe_prune(jit.store, jit.cfg, now()) == 1
+    jit.store.save_compactions([("toolu_tj_y_ff00", "h", None, 0)])
+    jit.store.x("UPDATE compactions SET ts = ts - ?", (10 * 86400,))
+    assert compaction.maybe_prune(jit.store, jit.cfg, now()) == 0, "not again within the hour"
+    assert compaction.maybe_prune(jit.store, jit.cfg, now() + 3601) == 1
+    jit.cfg.compact_retention_days = 0
+    assert compaction.maybe_prune(jit.store, jit.cfg, now() + 10 ** 6) == 0, "0 = keep forever"
+    jit.close()

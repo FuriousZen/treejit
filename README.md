@@ -43,18 +43,18 @@ A simulated agent works a mixed stream of coding tasks (typo fix / version bump 
 | treejit, read-only allowlist | 151–200 | 3.70 | 0.14 | 4,820 | 48% | 100% | 6.3 s |
 | treejit, edges approved | 41–50 | 1.10 | 0.80 | 2,169 | 98% | 100% | 2.5 s |
 | treejit, edges approved | 151–200 | **1.06** | 0.90 | 2,038 | **99%** | 100% | 2.6 s |
-| treejit, edges approved + compaction | 151–200 | **1.06** | 0.90 | **1,981** | **99%** | 100% | 2.6 s |
+| treejit, edges approved + compaction | 151–200 | **1.06** | 0.90 | **1,893** | **99%** | 100% | 2.6 s |
 
 Seeds 0–5. Success is over all 200 tasks; the other columns are tasks 151–200 (plain agent / allowlist / approved / approved + compaction):
 
 | seed | success (of 200) | full calls / task | small calls / task | tokens / task | served |
 |---|---|---|---|---|---|
-| 0 | 193 / 198 / 200 / 200 | 6.02 / 3.70 / 1.06 / 1.06 | – / 0.14 / 0.90 / 0.90 | 6,196 / 4,820 / 2,038 / 1,981 | 0 / 48 / 99 / 99% |
-| 1 | 189 / 198 / 200 / 200 | 6.36 / 4.20 / 1.02 / 1.02 | – / 0.02 / 0.28 / 0.28 | 6,684 / 5,311 / 1,637 / 1,560 | 0 / 41 / 100 / 100% |
+| 0 | 193 / 198 / 200 / 200 | 6.02 / 3.70 / 1.06 / 1.06 | – / 0.14 / 0.90 / 0.90 | 6,196 / 4,820 / 2,038 / 1,893 | 0 / 48 / 99 / 99% |
+| 1 | 189 / 198 / 200 / 200 | 6.36 / 4.20 / 1.02 / 1.02 | – / 0.02 / 0.28 / 0.28 | 6,684 / 5,311 / 1,637 / 1,445 | 0 / 41 / 100 / 100% |
 | 2 | 192 / 198 / 200 / 200 | 6.32 / 4.12 / 1.00 / 1.00 | – / 0.00 / 0.78 / 0.78 | 6,711 / 5,279 / 1,931 / 1,734 | 0 / 39 / 100 / 100% |
-| 3 | 189 / 198 / 199 / 199 | 6.26 / 4.18 / 1.04 / 1.04 | – / 0.08 / 1.08 / 1.08 | 6,590 / 5,527 / 2,234 / 2,127 | 0 / 43 / 99 / 99% |
-| 4 | 185 / 198 / 199 / 199 | 6.28 / 4.08 / 1.02 / 1.02 | – / 0.10 / 1.20 / 1.20 | 6,744 / 5,513 / 2,315 / 2,248 | 0 / 45 / 100 / 100% |
-| 5 | 192 / 198 / 200 / 200 | 6.66 / 4.58 / 1.00 / 1.00 | – / 0.00 / 0.02 / 0.02 | 7,401 / 6,014 / 1,452 / 1,407 | 0 / 37 / 100 / 100% |
+| 3 | 189 / 198 / 199 / 199 | 6.26 / 4.18 / 1.04 / 1.04 | – / 0.08 / 1.08 / 1.08 | 6,590 / 5,527 / 2,234 / 2,040 | 0 / 43 / 99 / 99% |
+| 4 | 185 / 198 / 199 / 199 | 6.28 / 4.08 / 1.02 / 1.02 | – / 0.10 / 1.20 / 1.20 | 6,744 / 5,513 / 2,315 / 2,140 | 0 / 45 / 100 / 100% |
+| 5 | 192 / 198 / 200 / 200 | 6.66 / 4.58 / 1.00 / 1.00 | – / 0.00 / 0.02 / 0.02 | 7,401 / 6,014 / 1,452 / 1,230 | 0 / 37 / 100 / 100% |
 
 - With edges approved (`treejit approve '*'`, which simulates operator review of write steps and commit points), almost every tool call is served from about task 40 on; the only full call left is usually the final answer. With the default read-only allowlist, only read steps replay, and T2/T3 rarely apply (their options must be replayable too).
 - treejit never does worse than the plain agent on these seeds. The remaining failures are the simulated model's own shortcuts at steps it still decides (allowlist mode), and one misroute at seed 3 (task 13, below).
@@ -220,30 +220,61 @@ Rules:
    - its features show no error.
 
    Model-chosen, side-exited and errored steps are always sent in full.
-2. **Keep the last few.** The last `compact_keep_last` (default 3) observations are always sent in full. Observations under `compact_min_chars` (default 400) are left alone.
-3. **Keep what decisions read.** An observation is kept when either of these reads it:
-   - **current:** a binding rule (`["x", ["obs", k], …]`, including those nested in `fmt`, and `case`), a guard, or a decision list of any child of any current frontier context (root path and n-gram);
-   - **path:** a binding rule of the edge any earlier step took, at any of that step's contexts or at the replayed node.
+2. **Keep the last few.** The last `compact_keep_last` (default 3) observations of a request are sent in full. Observations under `compact_min_chars` (default 400) are left alone.
+3. **Keep what the next decision reads.** An observation is kept when a binding rule (`["x", ["obs", k], …]`, including those nested in `fmt`, and `case`), a guard, or a decision list of any child of any current frontier context (root path and n-gram) reads it. Binding rules reach back at most 3 observations, so this only matters when `compact_keep_last` is below 3. The older "path" rule (keep what an earlier step's bindings read) is off by default, `compact_keep_path = true` restores it: decisions are made on the harness's uncompacted body, so it protected nothing, and dropping it changed no trajectory on seeds 0–5 (PLAN C2).
+4. **Append-only (`compact_mode = "first_sight"`, the default).** A step may be compacted only in the *first* forwarded request that contains it. Once it went upstream in full it stays full, and once compacted it stays compacted, even after a tree rebuild or a restart. Consecutive forwards of one conversation are therefore byte-identical up to the previous request's last message (`fwd[i].messages[:len(fwd[i-1].messages)-1] == fwd[i-1].messages[:-1]`), and the provider's prompt cache keeps the whole prefix. In practice this compacts the steps of a *burst*: more than `compact_keep_last` steps replayed between two frontier calls, which is how treejit is used once edges are approved.
+   - Every decision is stored in `compactions`, keyed by call id and observation hash; a NULL digest means "sent in full". Digests are pure functions of the call and its observation (sorted-key labels, source-order JSON keys, no time or random ids).
+   - Without a row (pruned, another instance, compaction just switched on) the decision is reconstructed from the conversation: the first forward that contained step *i* is the request just before the first model-chosen step after *i* (or the current one), and step *i* was in its keep-last window iff *i* ≥ *f* − `compact_keep_last`.
+   - Steps of earlier episodes of the same conversation (before the last user text message) keep their stored digests.
+5. **Epoch re-compaction (`compact_mode = "epoch"`, opt-in).** As first-sight, but when the previous forward of this conversation is older than `compact_epoch_ttl` (default 300 s, the 5-minute cache TTL; set 3600 for the 1-hour TTL), the cache entry has expired and the next request rewrites the whole prefix anyway. That request is compacted like `window` below, and the result becomes the new sticky state. A conversation is identified by its first tool call id, and its last forward time is kept in `compact_convs`.
+6. **`compact_mode = "window"`** is the behaviour before this fix: the keep-last window moves on every request and the step that leaves it is compacted. It sends the fewest raw tokens, but it changes an earlier message on every forward, so it only suits providers without prompt caching.
 
-   `arg` rules read call arguments, which are never compacted. Binding rules reach back at most 3 observations, so with the default `compact_keep_last` everything the next decision can read is in the kept window anyway.
-4. **Deterministic and monotonic.** The digest is a pure function of the call and its observation: sorted-key labels, source-order JSON keys, no time or random ids. Decisions are *sticky*: the first time a call id is compacted, its digest is stored in `compactions` (keyed by call id + observation hash) and reused verbatim on every later request, even after a tree rebuild. A step therefore never flips back from compacted to full, and the provider's prompt-cache prefix survives up to the newest step that left the keep-last window. The only override is rule 2 or 3 "current", which applies if the harness rewinds a conversation.
+Each forwarded request records `compacted N obs/C chars` (plus `(epoch)` for an epoch re-compaction) in its note and the characters saved in `requests.compacted_chars`. `treejit prune` also drops the decisions of runs idle longer than `compact_retention_days` (default 7; `--compact-days N`, 0 keeps them), and the forward path does the same at most once an hour. A pruned conversation that comes back is forwarded with the same bytes, because the decisions are reconstructed.
 
-Each forwarded request records `compacted N obs/C chars` in its note and the characters saved in `requests.compacted_chars`. Older DBs get the column through a guarded `ALTER TABLE`.
+**Why first-sight, and the prompt cache.** Before this fix the README claimed the cache survived compaction. It didn't: in the moving window, the step that leaves the window changes from full to compacted in every request, so the previous request's cache entry never matches past that step. `tests/cache_model.py` bills request sequences the way the Anthropic prompt cache does (reads 0.1×, writes 1.25×, a breakpoint after `system` and one at the end of the conversation, 5-minute TTL), driving the real engine. The output is in `repro/C1_after_small.txt` and `repro/C1_after_bigsys.txt` (the latter with a 62.5k-character, Claude Code-sized system prompt). Billed input tokens against compaction off:
 
-**Results.** Averaged over all 200 tasks in `treejit+ok+compact` vs `treejit+ok`:
+| pattern (15 steps, ~3.3k-char observations) | window | first_sight | epoch |
+|---|---|---|---|
+| dense: forwarded after every replayed step | +119% (+43% big system) | ±0 | ±0 |
+| interleaved: every other step is the model's | +76% (+20%) | ±0 | ±0 |
+| bursty: 4 replayed steps between frontier calls | +9% (+3%) | **−20%** (−8%) | −20% (−8%) |
+| interleaved, a 10-minute pause before forward 7 | +15% | ±0 | **−27%** |
+| bursty, a 10-minute pause before forward 3 | −28% | −20% | **−45%** |
 
-| seed | tokens / task (compaction off) | tokens / task (compaction on) | change | success (off → on) |
+First-sight never bills more than compaction off: the bodies are the same sequence with some observations shorter, and every prefix is preserved. `tests/test_compaction.py` checks this for all three patterns and both breakpoint placements, and checks the append-only invariant over consecutive forwards. Chunking the window (advancing it every 3 or 5 steps) still cost +33% / +10% on the dense pattern in the original repro (`repro/C1_out_small.txt`), so it was not kept.
+
+On the simulated bench (`repro/C1_bench_billed.py`: each task's full calls billed as one conversation, subcalls left out), the edges-approved traffic is bursty, and first-sight is also the cheapest mode:
+
+| seed | billed / task: off | first_sight | window | compacted chars / task (first_sight / window) |
 |---|---|---|---|---|
-| 0 | 2,113 | 2,043 | −3.3% | 200 → 200 |
-| 1 | 1,892 | 1,832 | −3.2% | 200 → 200 |
-| 2 | 2,229 | 2,040 | −8.5% | 200 → 200 |
-| 3 | 2,369 | 2,243 | −5.3% | 199 → 199 |
-| 4 | 2,323 | 2,247 | −3.3% | 199 → 199 |
-| 5 | 1,877 | 1,813 | −3.4% | 200 → 200 |
+| 0 | 1,574 | 1,367 (−13.1%) | 1,391 (−11.6%) | 611 / 687 |
+| 1 | 1,557 | 1,360 (−12.6%) | 1,385 (−11.0%) | 584 / 665 |
+| 2 | 1,528 | 1,316 (−13.9%) | 1,331 (−12.9%) | 601 / 674 |
+| 3 | 1,555 | 1,351 (−13.1%) | 1,362 (−12.4%) | 595 / 627 |
+| 4 | 1,577 | 1,382 (−12.4%) | 1,413 (−10.4%) | 575 / 680 |
+| 5 | 1,591 | 1,366 (−14.2%) | 1,394 (−12.4%) | 655 / 740 |
 
-- Trajectories are identical, task for task, with compaction on and off. Compaction elides 230–674 observation characters per task.
+With a Claude Code-sized system prompt (`--bigsys`, 62.5k chars, written once per task) the savings shrink to −0.8% to −1.0% for first-sight and −0.7% to −0.9% for window. Trajectories are identical in all three modes.
+
+**What else breaks the prefix** (measured with the same model, `repro/C1_after_*.txt`, last table):
+
+- **Frontier hints** are appended to the last user message of a forwarded request and are not in the next one (the harness never saw them). With a breakpoint the harness placed itself on its last block (Claude Code does this), the hint sits after it and costs only its own tokens (+0.3% to +2.4% with `hints = always`). With top-level *automatic* caching the breakpoint lands on the hint, so no hinted request's cache entry is ever read again: +156% to +247% billed with `hints = always` (+58% to +65% with the big system prompt). The default `hints = failures` only hints at nodes with failed edges. On models that enforce preserved thinking, deleting the hint is also a history edit. Not fixed here (`dialects.inject_hint`): the fix is to pin an explicit breakpoint on the last harness block before appending the hint, or to keep hints in later requests.
+- **The thinking drop.** `prepare_forward` removes `thinking` once the episode has a replayed step. Toggling thinking invalidates the messages cache on every model, but it happens at most twice per episode (on → off at the first forward after a replay, off → on when a new episode starts), and the prefix it invalidates is usually short: +0.1% in the model. On models where thinking can't be disabled (omitting `thinking` means adaptive), the drop disables nothing.
+
+**Results.** Averaged over all 200 tasks in `treejit+ok+compact` (first_sight) vs `treejit+ok`:
+
+| seed | tokens / task (compaction off) | tokens / task (compaction on) | change | compacted chars / task | success (off → on) |
+|---|---|---|---|---|---|
+| 0 | 2,113 | 1,948 | −7.8% | 611 | 200 → 200 |
+| 1 | 1,892 | 1,733 | −8.4% | 584 | 200 → 200 |
+| 2 | 2,229 | 2,061 | −7.5% | 601 | 200 → 200 |
+| 3 | 2,369 | 2,208 | −6.8% | 595 | 199 → 199 |
+| 4 | 2,323 | 2,167 | −6.7% | 575 | 199 → 199 |
+| 5 | 1,877 | 1,699 | −9.5% | 655 | 200 → 200 |
+
+- Trajectories (success, calls, tiers) are identical, task for task, with compaction on and off.
+- Compared with the moving window with the path rule (the previous default: 230–674 chars/task, −3.2% to −8.5%), first-sight without the path rule compacts more, not less: dropping rule 3b more than makes up for keeping steps that were first sent inside the window.
 - Retail is unaffected: its observations are under 400 characters.
-- Rule 3 "path" is what limits the savings: the typo and bump `Edit`s bind `old_string` from the `Read` output, so the file is kept for the rest of the episode. Dropping that rule (an experiment, not an option) compacted 2.8× more (797 vs 288 chars/task at seed 0; tokens/task 1,894 vs 2,034) with unchanged success in this suite. That was measured before decisions 11–14, which changed the seed-0 trajectories slightly.
 - Compaction only acts on frontier calls. With edges approved there are few of them, often just the final answer.
 
 ## Known limits
@@ -254,7 +285,7 @@ Each forwarded request records `compacted N obs/C chars` in its note and the cha
 - **One misroute before a chance rule is caught.** A task-word rule whose first `task_rule_support` examples all agree by chance still replays once into the input that breaks it; the failed run then demotes it (seed 3, task 13). A higher `task_rule_support` trades small calls for fewer of these.
 - **Negatives are counted per rule, not per input class.** A rule with many passing replays that starts misrouting a new kind of task needs several failures before the excess over the tolerated rate (`1 - purity`) shows. Only then is it demoted.
 - **END needs a passing run and a visible final answer.** Streams consumed outside the engine (inline-mode streaming) don't record where the model stopped, and runs without an outcome never add END evidence.
-- **Compaction and the prompt cache.** The keep-last window moves as the conversation grows. The step that leaves it changes from full to compacted once, which invalidates the cache from that message on. A chunked boundary (advancing the window only every few steps) would trade a little compaction for longer cache hits; it isn't implemented.
+- **Compaction and the prompt cache.** The default first-sight mode never changes a message already sent, so it compacts only steps replayed in a burst before a frontier call; a step first sent inside the keep-last window stays full until an epoch (`compact_mode = "epoch"`, only after the cache went cold). The cost model is first-order: no 20-block lookback, no minimum cacheable length, one breakpoint layout. Frontier hints still break the cache under top-level automatic caching (see above).
 - **Run identity.** Without an `X-TreeJIT-Run` header, run ids are derived from the task and first tool-call id. Resuming the same task text in a new conversation starts a new run.
 
 ## Development

@@ -1,0 +1,73 @@
+system chars=392
+
+=== dense: warm cache (10 s between forwards) ===
+   mode         reqs  input tok  cache read    billed  vs off (raw)  vs off (billed)  prefix breaks
+   off            15    105,259      92,195    25,549         +0.0%            +0.0%  []
+   window         15     49,044       4,642    55,967        -53.4%          +119.1%  [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+   first_sight    15    105,259      92,195    25,549         +0.0%            +0.0%  []
+   epoch          15    105,259      92,195    25,549         +0.0%            +0.0%  []
+
+=== interleaved: warm cache (10 s between forwards) ===
+   mode         reqs  input tok  cache read    billed  vs off (raw)  vs off (billed)  prefix breaks
+   off             8     33,517      26,128    11,850         +0.0%            +0.0%  []
+   window          8     18,380       1,892    20,799        -45.2%           +75.5%  [2, 3, 4, 5, 6, 7]
+   first_sight     8     33,517      26,128    11,850         +0.0%            +0.0%  []
+   epoch           8     33,517      26,128    11,850         +0.0%            +0.0%  []
+
+=== bursty: warm cache (10 s between forwards) ===
+   mode         reqs  input tok  cache read    billed  vs off (raw)  vs off (billed)  prefix breaks
+   off             4     31,843      21,213    15,409         +0.0%            +0.0%  []
+   window          4     13,802         442    16,744        -56.7%            +8.7%  [1, 2, 3]
+   first_sight     4     25,338      16,880    12,260        -20.4%           -20.4%  []
+   epoch           4     25,338      16,880    12,260        -20.4%           -20.4%  []
+
+=== dense: 10-minute pause before forward #2 (cache expired, 5-min TTL) ===
+   mode         reqs  input tok  cache read    billed  vs off (raw)  vs off (billed)  prefix breaks
+   off            15    105,259      90,330    27,695         +0.0%            +0.0%  []
+   window         15     49,044       2,776    58,113        -53.4%          +109.8%  [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+   first_sight    15    105,259      90,330    27,695         +0.0%            +0.0%  []
+   epoch          15    105,259      90,330    27,695         +0.0%            +0.0%  []
+
+=== dense: 10-minute pause before forward #6 (cache expired, 5-min TTL) ===
+   mode         reqs  input tok  cache read    billed  vs off (raw)  vs off (billed)  prefix breaks
+   off            15    105,259      86,904    31,634         +0.0%            +0.0%  []
+   window         15     49,044       4,494    56,137        -53.4%           +77.5%  [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+   first_sight    15    105,259      86,904    31,634         +0.0%            +0.0%  []
+   epoch          15     79,330      63,856    25,728        -24.6%           -18.7%  [6]
+
+=== interleaved: 10-minute pause before forward #2 (cache expired, 5-min TTL) ===
+   mode         reqs  input tok  cache read    billed  vs off (raw)  vs off (billed)  prefix breaks
+   off             8     33,517      24,212    14,052         +0.0%            +0.0%  []
+   window          8     18,380       1,745    20,968        -45.2%           +49.2%  [2, 3, 4, 5, 6, 7]
+   first_sight     8     33,517      24,212    14,052         +0.0%            +0.0%  []
+   epoch           8     29,196      20,611    12,792        -12.9%            -9.0%  [2]
+
+=== interleaved: 10-minute pause before forward #6 (cache expired, 5-min TTL) ===
+   mode         reqs  input tok  cache read    billed  vs off (raw)  vs off (billed)  prefix breaks
+   off             8     33,517      20,576    18,234         +0.0%            +0.0%  []
+   window          8     18,380       1,745    20,968        -45.2%           +15.0%  [2, 3, 4, 5, 6, 7]
+   first_sight     8     33,517      20,576    18,234         +0.0%            +0.0%  []
+   epoch           8     26,315      16,974    13,373        -21.5%           -26.7%  [6]
+
+=== bursty: 10-minute pause before forward #2 (cache expired, 5-min TTL) ===
+   mode         reqs  input tok  cache read    billed  vs off (raw)  vs off (billed)  prefix breaks
+   off             4     31,843      14,159    23,521         +0.0%            +0.0%  []
+   window          4     13,802         294    16,914        -56.7%           -28.1%  [1, 2, 3]
+   first_sight     4     25,338      11,266    18,716        -20.4%           -20.4%  []
+   epoch           4     16,694       6,945    12,882        -47.6%           -45.2%  [2]
+
+=== bursty: 10-minute pause before forward #6 (cache expired, 5-min TTL) ===
+   mode         reqs  input tok  cache read    billed  vs off (raw)  vs off (billed)  prefix breaks
+   off             4     31,843      21,213    15,409         +0.0%            +0.0%  []
+   window          4     13,802         442    16,744        -56.7%            +8.7%  [1, 2, 3]
+   first_sight     4     25,338      16,880    12,260        -20.4%           -20.4%  []
+   epoch           4     25,338      16,880    12,260        -20.4%           -20.4%  []
+
+=== hints and the thinking drop (compaction off vs on, first_sight) ===
+   scenario                           breakpoints      off    off+X   X cost  first_sight+X  vs off+X
+   interleaved, hints=always              harness   11,850   12,133    +2.4%         12,133     +0.0%
+   interleaved, hints=always                 auto   11,850   41,066  +246.5%         41,066     +0.0%
+   bursty, hints=always                   harness   15,409   15,531    +0.8%         12,382    -20.3%
+   bursty, hints=always                      auto   15,409   39,448  +156.0%         31,316    -20.6%
+   lead (model step 0), thinking on       harness   14,947   14,964    +0.1%          8,344    -44.2%
+   lead (model step 0), thinking on          auto   14,947   14,964    +0.1%          8,344    -44.2%
