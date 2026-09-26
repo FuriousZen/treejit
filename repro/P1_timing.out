@@ -1,0 +1,14 @@
+== /tmp/w7_base
+runs=  100 cold     225 ms   per-outcome rebuild     177 ms
+runs=  300 cold     369 ms   per-outcome rebuild     363 ms
+runs= 1000 cold    1044 ms   per-outcome rebuild    1044 ms
+runs= 2000 cold    2244 ms   per-outcome rebuild    2177 ms
+runs=  115 cold    1290 ms   per-outcome rebuild    1235 ms
+runs=  300 cold    6232 ms   per-outcome rebuild    6202 ms
+== /home/user/treejit/.claude/worktrees/agent-abe1daaca6370eb86
+runs=  100 cold     128 ms   per-outcome rebuild      89 ms
+runs=  300 cold     211 ms   per-outcome rebuild     166 ms
+runs= 1000 cold     565 ms   per-outcome rebuild     415 ms
+runs= 2000 cold    1122 ms   per-outcome rebuild     838 ms
+runs=  115 cold     274 ms   per-outcome rebuild     200 ms
+runs=  300 cold     678 ms   per-outcome rebuild     581 ms

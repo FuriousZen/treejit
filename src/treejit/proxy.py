@@ -7,7 +7,9 @@
 Routes:
     POST /v1/messages                 Anthropic Messages (JSON or SSE)
     POST /v1/chat/completions         OpenAI-compatible chat completions (JSON or SSE)
-    POST /outcome                     {"run_id": "...|latest", "outcome": "pass|fail|error", "reason": "..."}
+    POST /outcome                     {"run_id": "...|latest", "outcome": "pass|fail|error", "reason": "...", "wait": true}
+                                      rebuilds off the event loop; answers once the tree is rebuilt
+                                      ("wait": false: once the outcome is recorded)
     GET  /health, GET /stats
     anything else                     passed through untouched
 
@@ -16,6 +18,7 @@ Needs `httpx` (HTTP client) and an ASGI server such as `uvicorn`.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Any
@@ -35,6 +38,10 @@ class ProxyApp:
         self.jit = jit
         self.cfg = jit.cfg
         self._client = client
+        if self.cfg.rebuild == "auto":
+            # rebuilds run on the engine's worker thread: an outcome never stalls other requests,
+            # which keep the previous tree until the new one is swapped in
+            jit.set_rebuild_mode("background")
 
     @property
     def client(self) -> Any:
@@ -195,7 +202,9 @@ class ProxyApp:
             data = json.loads(body or b"{}")
             run_id = data.get("run_id") or "latest"
             result = data.get("outcome", data.get("result", data.get("pass")))
-            ids = self.jit.outcome(run_id, result, data.get("reason"))
+            wait = data.get("wait", True) is not False
+            # off the event loop: recording the outcome touches the db, and a sync-mode rebuild is CPU-bound
+            ids = await asyncio.to_thread(self.jit.outcome, run_id, result, data.get("reason"), wait)
         except (ValueError, json.JSONDecodeError) as e:
             await _json(send, 400, {"error": str(e)})
             return

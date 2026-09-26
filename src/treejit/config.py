@@ -62,6 +62,10 @@ class Config:
     tomb_prob: float = 0.5
     half_life_days: float = 14.0
     max_runs: int = 2000           # most recent runs per family a rebuild reads (bounds build time)
+    # when an outcome rebuilds its family's tree: "sync" (before outcome() returns: inline mode, the
+    # bench), "background" (a worker thread, coalescing per family; the live view is swapped when the
+    # build is done), "auto" (background under `treejit serve`, sync otherwise)
+    rebuild: str = "auto"
     # eviction
     evict_days: float = 30.0
     evict_min_hits: int = 3

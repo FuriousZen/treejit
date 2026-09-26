@@ -13,10 +13,14 @@ can simply be re-run whenever an outcome arrives:
 
 from __future__ import annotations
 
+import dataclasses
+import functools
 import json
-from collections import defaultdict
+import threading
+import time
+from collections import Counter, OrderedDict, defaultdict
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from .bindings import Sources, find_rule
 from .config import Config
@@ -24,9 +28,9 @@ from .features import excess_negatives, guard_holds, guard_of, learn_decision_li
 from .model import Observation, Step, ToolCall, user_ended
 from .policy import commit_reason, is_readonly
 from .store import Store, dumps
-from .templates import anti_unify, call_slots, edge_id, label, shape_of, var_slots
+from .templates import TemplateFold, anti_unify, call_slots, edge_id, label, shape_of, var_slots
 from .tree import END, contexts, node_id
-from .util import decay, now
+from .util import canon, decay, now
 
 MAX_INSTANCES = 40  # most recent passing instances used for bindings/guards
 NE_COLS = ("node", "edge", "family", "n", "pass_runs", "fail_runs", "pass_n", "blamed", "tomb", "live", "replayable",
@@ -47,6 +51,7 @@ class RunData:
     ended_after: int | None = None    # the model gave its final answer after this many steps
     inherited: int = 0                # leading steps copied from a finished run this one forks: context only
     steps: list[Step] = field(default_factory=list)
+    args_text: list[str] = field(default_factory=list)   # each step's stored (canonical) args JSON
     replayed: list[bool] = field(default_factory=list)
     eids: list[str] = field(default_factory=list)
     slots: list[dict | None] = field(default_factory=list)
@@ -79,14 +84,121 @@ def load_runs(store: Store, family: str, limit: int = 1_000_000) -> list[RunData
                                 r["inherited"] or 0)
     if not runs:
         return []
-    for s in store.q("SELECT s.* FROM steps s JOIN runs r ON r.id=s.run_id WHERE r.family=? ORDER BY s.run_id, s.idx", (family,)):
-        rd = runs.get(s["run_id"])
-        if rd is None or s["idx"] != len(rd.steps):
-            continue  # gap in the log; ignore the rest of this run
-        obs = Observation(s["obs"], bool(s["is_error"])) if s["obs"] is not None else None
-        rd.steps.append(Step(ToolCall(s["call_id"], s["tool"], json.loads(s["args"])), obs))
-        rd.replayed.append(bool(s["replayed"]))
+    ids = list(runs)  # only the selected runs' steps (not every step of the family)
+    for k in range(0, len(ids), 500):
+        chunk = ids[k : k + 500]
+        for s in store.q(f"SELECT * FROM steps WHERE run_id IN ({','.join('?' * len(chunk))}) ORDER BY run_id, idx", chunk):
+            rd = runs[s["run_id"]]
+            if s["idx"] != len(rd.steps):
+                continue  # gap in the log; ignore the rest of this run
+            obs = Observation(s["obs"], bool(s["is_error"])) if s["obs"] is not None else None
+            rd.steps.append(Step(ToolCall(s["call_id"], s["tool"], json.loads(s["args"])), obs))
+            rd.args_text.append(s["args"])
+            rd.replayed.append(bool(s["replayed"]))
     return [r for r in runs.values() if r.steps]
+
+
+# ------------------------------------------------------------ memoization across rebuilds
+#
+# A rebuild re-derives everything from the trace log, but most of it is a pure function of step
+# data that doesn't change between rebuilds: a step's shape, its observation's features, a context's
+# node id, the policy verdicts on a reference call, and each shape's template (a left fold over its
+# calls, resumed when the instances only grew). All caches are bounded and keyed by content, so a
+# hit returns exactly what recomputing would.
+
+
+MEMO_MAX_CHARS = 8192  # longer keys (a large file write, a long observation) are recomputed, not kept
+
+
+class _Memo:
+    """A bounded dict that starts over when full (simple, and the steady state fits)."""
+
+    def __init__(self, size: int) -> None:
+        self.size = size
+        self.d: dict = {}
+
+    def get(self, key: Any, chars: int, make: Callable[[], Any]) -> Any:
+        if chars > MEMO_MAX_CHARS:
+            return make()
+        try:
+            return self.d[key]
+        except KeyError:
+            pass
+        v = make()
+        if len(self.d) >= self.size:
+            self.d = {}
+        self.d[key] = v
+        return v
+
+
+_SHAPES = _Memo(1 << 16)
+_FEATS = _Memo(1 << 15)
+_POLICY = _Memo(1 << 14)
+_node_id = functools.lru_cache(maxsize=1 << 16)(node_id)
+_FOLDS: OrderedDict[tuple[str, str], TemplateFold] = OrderedDict()
+_FOLDS_MAX = 512
+_FOLD_MAX_CHARS = 4 << 20
+_FOLDS_LOCK = threading.Lock()
+
+
+def _shape(call: ToolCall, args_text: str) -> str:
+    return _SHAPES.get((call.name, args_text), len(args_text), lambda: shape_of(call))
+
+
+def _features(obs: Observation | None) -> dict:
+    """obs_features, shared between steps with the same observation (read-only)."""
+    if obs is None:
+        return obs_features(None)
+    return _FEATS.get((obs.text, obs.is_error), len(obs.text), lambda: obs_features(obs))
+
+
+def _template(family: str, shape: str, calls: list[ToolCall], keys: list[str]) -> dict:
+    """anti_unify(calls), folding only the calls appended since the last build of this shape."""
+    with _FOLDS_LOCK:
+        fold = _FOLDS.get((family, shape))
+    n = len(fold.keys) if fold is not None else 0
+    if fold is None or n > len(keys) or fold.keys != keys[:n]:
+        fold, n = TemplateFold(), 0
+    new = fold.extend(calls[n:], keys[n:])
+    if new is None:
+        return anti_unify(calls)
+    if sum(map(len, keys)) > _FOLD_MAX_CHARS:
+        return new.template()  # too big to keep around (large file writes): fold from scratch next time
+    with _FOLDS_LOCK:
+        _FOLDS[(family, shape)] = new
+        _FOLDS.move_to_end((family, shape))
+        while len(_FOLDS) > _FOLDS_MAX:
+            _FOLDS.popitem(last=False)
+    return new.template()
+
+
+def _policy(tool: str, args: dict, cfg: Config, cfg_key: str) -> tuple[str, bool]:
+    """(commit_reason, is_readonly) of a reference call under this config."""
+    text = json.dumps(args, ensure_ascii=False, default=str)  # key order kept: reasons are listed in args order
+    return _POLICY.get((cfg_key, tool, text), len(text), lambda: (commit_reason(tool, args, cfg), is_readonly(tool, args, cfg)))
+
+
+def _shared_only(examples: list[tuple[str, dict, str, set]]) -> list[tuple[str, dict, str, set]]:
+    """Examples without the feature values no other example shares (an id, a price: most of a JSON
+    observation's features). A predicate on such a value holds on at most one example, and
+    learn_decision_list never picks a predicate that holds on fewer than two, so the decision list
+    is the same; it just doesn't evaluate thousands of them. Values are grouped by Python equality,
+    the comparison eval_pred makes (1 == 1.0 == True share a group)."""
+    try:
+        counts = Counter((k, v) for e in examples for k, v in e[1].items())
+    except TypeError:  # an unhashable value: keep everything
+        return examples
+    if all(c > 1 for c in counts.values()):
+        return examples
+    return [(e[0], {k: v for k, v in e[1].items() if counts[(k, v)] > 1}, e[2], e[3]) for e in examples]
+
+
+def clear_caches() -> None:
+    for m in (_SHAPES, _FEATS, _POLICY):
+        m.d = {}
+    _node_id.cache_clear()
+    with _FOLDS_LOCK:
+        _FOLDS.clear()
 
 
 def _usage_by_call(store: Store, family: str) -> dict[str, tuple[float, float]]:
@@ -112,22 +224,29 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
     not_commit = store.not_commit()
     evicted = store.evictions()
     usage = _usage_by_call(store, family)
+    cfg_key = canon(dataclasses.asdict(cfg))
 
     # 1. edge templates by shape
     by_shape: dict[str, list[ToolCall]] = defaultdict(list)
+    keys_of: dict[str, list[str]] = defaultdict(list)
+    shapes: list[list[str]] = []
     for rd in runs:
-        for st in rd.steps:
-            by_shape[shape_of(st.call)].append(st.call)
-    templates = {s: anti_unify(calls) for s, calls in by_shape.items()}
+        rs = []
+        for st, text in zip(rd.steps, rd.args_text):
+            s = _shape(st.call, text)
+            rs.append(s)
+            by_shape[s].append(st.call)
+            keys_of[s].append(text)
+        shapes.append(rs)
+    templates = {s: _template(family, s, calls, keys_of[s]) for s, calls in by_shape.items()}
     eid_of = {s: edge_id(family, s) for s in by_shape}
     edge_tpl = {eid_of[s]: templates[s] for s in by_shape}
 
-    for rd in runs:
-        for st in rd.steps:
-            s = shape_of(st.call)
+    for rd, rs in zip(runs, shapes):
+        for st, s in zip(rd.steps, rs):
             rd.eids.append(eid_of[s])
             rd.slots.append(call_slots(templates[s], st.call))
-            rd.feats.append(obs_features(st.obs))
+            rd.feats.append(_features(st.obs))
 
     # 2. contexts
     inst: dict[tuple[str, str], list[tuple[RunData, int]]] = defaultdict(list)
@@ -149,7 +268,7 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
                 continue
             nids = []
             for kind, ctx in contexts(rd.eids, i, cfg):
-                nid = node_id(family, kind, ctx)
+                nid = _node_id(family, kind, ctx)
                 if evicted.get(nid, 0) >= rd.updated:
                     continue
                 node_meta[nid] = (kind, ctx)
@@ -177,7 +296,7 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
     stops += [(rd, i) for rd, i in user_stops if rd.passed]
     for rd, at in stops:
         for kind, ctx in contexts(rd.eids, at, cfg):
-            nid = node_id(family, kind, ctx)
+            nid = _node_id(family, kind, ctx)
             if evicted.get(nid, 0) >= rd.updated:
                 continue
             node_meta[nid] = (kind, ctx)
@@ -300,11 +419,11 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
             post = postcondition(with_obs) if len(with_obs) == len(passing) else {}
         ref_rd, ref_i = (passing or lst or [(rd, i + 1) for rd, i in corr[(nid, eid)]])[-1]
         ref = ref_rd.steps[ref_i].call.args
-        why_commit = commit_reason(tpl["tool"], ref, cfg)
+        why_commit, readonly = _policy(tpl["tool"], ref, cfg, cfg_key)
         # `treejit approve EDGE --not-commit` is per edge; `approve '*'` never implies it
         commit = bool(why_commit) and eid not in not_commit
         approved = (eid, nid) in approvals or (eid, "") in approvals or ("*", "") in approvals
-        safe = is_readonly(tpl["tool"], ref, cfg) or approved
+        safe = readonly or approved
         fillable = live and not tomb and safe and (not commit or (approved and pass_runs >= cfg.promote_runs + 1))
         replayable = fillable and not holes
         tier = "tomb" if tomb else "hot" if replayable else "live" if live else "warm" if pass_runs else "cold"
@@ -346,11 +465,11 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
         examples = [example(rd, i, eid) for rd, i, eid in by_node.get(nid, [])[-200:]]
         negatives = [example(rd, i, eid) for rd, i, eid in negs.get(nid, [])[-200:]]
         confirmed = [example(rd, i, eid) for rd, i, eid in confs.get(nid, [])[-200:]] if negatives else []
-        stump = learn_decision_list(examples, cfg.purity, negatives=negatives, confirmed=confirmed, class_sets=True) \
-            if len({e[0] for e in examples}) > 1 else None
+        stump = learn_decision_list(_shared_only(examples), cfg.purity, negatives=negatives, confirmed=confirmed,
+                                    class_sets=True) if len({e[0] for e in examples}) > 1 else None
         parent = via = None
         if kind == "r" and ctx:
-            parent, via = node_id(family, "r", ctx[:-1]), ctx[-1]
+            parent, via = _node_id(family, "r", ctx[:-1]), ctx[-1]
         node_rows.append((nid, family, kind, dumps(list(ctx)), len(ctx), parent, via, len(node_runs[nid]),
                           node_pass_n[nid], dumps(stump) if stump else None, node_seen[nid], node_end[nid]))
 
@@ -366,5 +485,19 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", node_rows)
         db.executemany(f"INSERT INTO node_edges({','.join(NE_COLS)}) VALUES({','.join('?' * len(NE_COLS))})", ne_rows)
         db.execute("UPDATE families SET built_at=?, dirty=0 WHERE id=?", (t_now, family))
-    return {"family": family, "runs": len(runs), "edges": len(edge_rows), "nodes": len(node_rows),
-            "hot": sum(1 for r in ne_rows if r[11] == "hot"), "tomb": sum(1 for r in ne_rows if r[11] == "tomb")}
+    out = {"family": family, "runs": len(runs), "edges": len(edge_rows), "nodes": len(node_rows),
+           "hot": sum(1 for r in ne_rows if r[11] == "hot"), "tomb": sum(1 for r in ne_rows if r[11] == "tomb")}
+    for big in (inst, step_nodes, by_shape, keys_of):
+        big.clear()
+    _release(runs)
+    return out
+
+
+def _release(runs: list[RunData], chunk: int = 100) -> None:
+    """Free the build's step data a chunk at a time, letting other threads run in between: dropped
+    all at once, 10^5 objects are deallocated in one go while holding the GIL (a proxy running the
+    build in the background would stall for tens of ms)."""
+    for k in range(0, len(runs), chunk):
+        for rd in runs[k : k + chunk]:
+            rd.steps, rd.slots, rd.feats, rd.args_text, rd.eids, rd.replayed = [], [], [], [], [], []
+        time.sleep(0)

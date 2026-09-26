@@ -1,0 +1,4 @@
+max_runs=  100: POST /outcome     119 ms (status 200); event loop blocked (worst /health delay)       9 ms
+max_runs=  300: POST /outcome     155 ms (status 200); event loop blocked (worst /health delay)       5 ms
+max_runs= 1000: POST /outcome     364 ms (status 200); event loop blocked (worst /health delay)      10 ms
+max_runs= 2000: POST /outcome     878 ms (status 200); event loop blocked (worst /health delay)      13 ms
