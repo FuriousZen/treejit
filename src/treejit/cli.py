@@ -127,9 +127,12 @@ def cmd_stats(a: argparse.Namespace) -> None:
     jit = _jit(a)
     s = jit.stats(a.family)
     total = sum(v["tool_calls"] for v in s.values()) or 1
-    replayed = sum(v["tool_calls"] for k, v in s.items() if k in ("T0", "T1"))
+    replayed = sum(v["tool_calls"] for k, v in s.items() if k in ("T0", "T1", "T2", "T3"))
+    small = sum(v["requests"] for k, v in s.items() if k in ("T2", "T3"))
     print(json.dumps(s, indent=2))
     print(f"tool calls served by replay: {replayed}/{total} ({100 * replayed / total:.1f}%)")
+    print(f"T2/T3 subcalls: {small} (T2 {s.get('T2', {}).get('requests', 0)}, T3 {s.get('T3', {}).get('requests', 0)}); "
+          f"full model calls (T4): {s.get('T4', {}).get('requests', 0)}")
 
 
 def main(argv: list[str] | None = None) -> None:

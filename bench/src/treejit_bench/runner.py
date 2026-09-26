@@ -37,12 +37,14 @@ class TaskResult:
     kind: str
     success: bool
     reason: str
-    model_calls: int = 0
+    model_calls: int = 0      # full model calls (T4, or every call for the plain agent)
+    small_calls: int = 0      # treejit T2/T3 subcalls (short prompt, forced tool)
     tool_calls: int = 0
     replayed_calls: int = 0
     side_exits: int = 0       # replayed steps whose result broke the learned postcondition
     input_tokens: int = 0
-    output_tokens: int = 0
+    output_tokens: int = 0    # both include subcall tokens
+    small_tokens: int = 0
     model_ms: float = 0.0
     engine_ms: float = 0.0
     tiers: list = field(default_factory=list)
@@ -88,11 +90,11 @@ def run_suite(n_tasks: int, seed: int = 0, family: str = "mixed", mode: str = "t
         msgs: list[dict] = [{"role": "user", "content": text}]
         for _ in range(max_steps):
             body = {"model": "sim-1", "max_tokens": 1024, "system": system, "tools": tools, "messages": msgs}
-            before = model.calls
+            before = _snap(model)
             t0 = time.perf_counter()
             resp = call(body, f"task-{seed}-{i}")
             ms = (time.perf_counter() - t0) * 1000
-            _account(r, resp, model.calls > before, ms)
+            _account(r, resp, before, _snap(model), ms)
             msgs.append({"role": "assistant", "content": resp["content"]})
             results_blocks = _execute(env, resp["content"])
             if not results_blocks:
@@ -125,9 +127,22 @@ def _side_exits(jit: TreeJIT, run_id: str) -> int:
     return int(row["n"]) if row else 0
 
 
-def _account(r: TaskResult, resp: dict, from_model: bool, ms: float) -> None:
+def _snap(model: SimModel) -> tuple[int, int, int, int]:
+    return model.calls, model.small_calls, model.small_tokens[0], model.small_tokens[1]
+
+
+def _account(r: TaskResult, resp: dict, before: tuple, after: tuple, ms: float) -> None:
     uses = [b for b in resp.get("content", []) if b.get("type") == "tool_use"]
     r.tool_calls += len(uses)
+    from_model = after[0] > before[0]
+    small = after[1] - before[1]
+    if small:
+        s_in, s_out = after[2] - before[2], after[3] - before[3]
+        r.small_calls += small
+        r.small_tokens += s_in + s_out
+        r.input_tokens += s_in
+        r.output_tokens += s_out
+        r.model_ms += small * MODEL_BASE_MS + MODEL_MS_PER_TOKEN * s_out
     if from_model:
         u = resp.get("usage") or {}
         r.model_calls += 1
@@ -139,7 +154,7 @@ def _account(r: TaskResult, resp: dict, from_model: bool, ms: float) -> None:
     else:
         r.replayed_calls += len(uses)
         r.engine_ms += ms
-        r.tiers.append("R")
+        r.tiers.append("S" if small else "R")
 
 
 # ============================================================================ via the real proxy
@@ -252,14 +267,14 @@ async def _run_proxy_async(n_tasks: int, seed: int, family: str, mode: str, nois
             msgs: list[dict] = [{"role": "user", "content": text}]
             for _ in range(max_steps):
                 body = {"model": "sim-1", "max_tokens": 1024, "system": system, "tools": tools, "messages": msgs, "stream": stream}
-                before = model.calls
+                before = _snap(model)
                 t0 = time.perf_counter()
                 http = await client.post("/v1/messages", json=body, headers={"x-api-key": "sk-test", "anthropic-version": "2023-06-01",
                                                                              "X-TreeJIT-Run": run_id})
                 ms = (time.perf_counter() - t0) * 1000
                 http.raise_for_status()
                 resp = parse_anthropic_sse(http.content) if stream else http.json()
-                _account(r, resp, model.calls > before, ms)
+                _account(r, resp, before, _snap(model), ms)
                 msgs.append({"role": "assistant", "content": resp["content"]})
                 blocks = _execute(env, resp["content"])
                 if not blocks:
@@ -287,7 +302,7 @@ def to_rows(results: list[TaskResult]) -> list[dict]:
     rows = []
     for r in results:
         d = asdict(r)
-        d["tiers"] = "".join("R" if t == "R" else "M" for t in r.tiers)
+        d["tiers"] = "".join(t if t in ("R", "S") else "M" for t in r.tiers)
         d["tokens"] = r.tokens
         d["wall_ms"] = round(r.wall_ms, 1)
         d["model_ms"] = round(r.model_ms, 1)

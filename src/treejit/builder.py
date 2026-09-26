@@ -84,6 +84,8 @@ def load_runs(store: Store, family: str, limit: int = 1_000_000) -> list[RunData
 
 
 def _usage_by_call(store: Store, family: str) -> dict[str, tuple[float, float]]:
+    """Cost of the full (T4) model call that produced each call id. Savings are measured
+    against T4 only; T2/T3 subcalls are logged with their own usage but never count as savings."""
     out: dict[str, tuple[float, float]] = {}
     for r in store.q("SELECT call_ids, input_tokens, output_tokens, cache_read, cache_write, latency_ms, n_calls "
                      "FROM requests WHERE family=? AND tier='T4' AND call_ids IS NOT NULL", (family,)):
@@ -237,8 +239,8 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
         commit = is_commit_point(tpl["tool"], ref, cfg)
         approved = (eid, nid) in approvals or (eid, "") in approvals or ("*", "") in approvals
         safe = is_readonly(tpl["tool"], ref, cfg) or approved
-        replayable = (live and not tomb and not holes and safe
-                      and (not commit or (approved and pass_runs >= cfg.promote_runs + 1)))
+        fillable = live and not tomb and safe and (not commit or (approved and pass_runs >= cfg.promote_runs + 1))
+        replayable = fillable and not holes
         tier = "tomb" if tomb else "hot" if replayable else "live" if live else "warm" if pass_runs else "cold"
         costs = [usage[rd.steps[i].call.id] for rd, i in lst if not rd.replayed[i] and rd.steps[i].call.id in usage]
         savings = sum(c[0] for c in costs) / len(costs) if costs else 0.0
@@ -253,7 +255,7 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
             nid, eid, family, len(lst), pass_runs, fail_runs, pass_n, round(f, 4), int(tomb), int(live), int(replayable),
             tier, round(purity, 4), round(success, 4), round(purity * success, 4), dumps(bindings), dumps(holes),
             dumps(guard), dumps(post), dumps(ref), dumps(reasons[:3]), int(commit), round(savings, 1), round(latency, 1),
-            round(pass_runs * max(savings, 1.0) * templatability, 2),
+            round(pass_runs * max(savings, 1.0) * templatability, 2), int(fillable),
         ))
 
     # 5. decision lists
@@ -286,7 +288,7 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
             db.execute(f"DELETE FROM {table} WHERE family=?", (family,))
         db.executemany("INSERT INTO edges VALUES(?,?,?,?,?,?,?)", edge_rows)
         db.executemany("INSERT INTO nodes VALUES(?,?,?,?,?,?,?,?,?,?,?)", node_rows)
-        db.executemany(f"INSERT INTO node_edges VALUES({','.join('?' * 25)})", ne_rows)
+        db.executemany(f"INSERT INTO node_edges VALUES({','.join('?' * 26)})", ne_rows)
         db.execute("UPDATE families SET built_at=?, dirty=0 WHERE id=?", (t_now, family))
     return {"family": family, "runs": len(runs), "edges": len(edge_rows), "nodes": len(node_rows),
             "hot": sum(1 for r in ne_rows if r[11] == "hot"), "tomb": sum(1 for r in ne_rows if r[11] == "tomb")}

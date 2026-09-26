@@ -9,7 +9,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-REPLAY_MARK = "tj"  # replayed tool-call ids: toolu_tj_<node12>_<conf:02x><rand> (call_tj_... for OpenAI)
+REPLAY_MARK = "tj"  # replayed tool-call ids: toolu_tj_<node12>_<conf:02x><rand>[_<via>] (call_tj_... for OpenAI)
+# <via>: how a subcall-assisted step was produced. t3: holes filled by the model; t2: the model
+# chose among known children; ck: the model confirmed a step at a budget checkpoint.
 
 
 @dataclass
@@ -48,6 +50,14 @@ class Step:
             except ValueError:
                 return None
         return None
+
+    @property
+    def replayed_via(self) -> str:
+        """'t2' | 'ck' | 't3' for steps produced with a subcall, '' otherwise."""
+        parts = self.call.id.split("_")
+        if len(parts) >= 5 and parts[1] == REPLAY_MARK:
+            return parts[4]
+        return ""
 
 
 @dataclass

@@ -59,10 +59,12 @@ class _Create:
         if kwargs.get("stream"):
             return self._call(kwargs, extra)
         res = self.jit.handle(self.dialect, kwargs, headers)
+        fwd_headers = {k: v for k, v in extra.items() if k.lower() != "x-treejit-run"}
+        if res.kind == "subcall":
+            res = self._subcall(res, fwd_headers)
         if res.kind == "replay":
             return _as_sdk(self.dialect, res.body) if self.sdk else res.body
         t0 = time.perf_counter()
-        fwd_headers = {k: v for k, v in extra.items() if k.lower() != "x-treejit-run"}
         try:
             out = self._call(res.body, fwd_headers)
         except Exception:
@@ -71,6 +73,15 @@ class _Create:
         info = dialects.get(self.dialect).parse_response(_to_dict(out))
         self.jit.complete(res, info, 200, (time.perf_counter() - t0) * 1000)
         return out
+
+    def _subcall(self, res: Any, headers: dict) -> Any:
+        """T2/T3: one small non-streaming call; any failure falls back to the T4 forward."""
+        t0 = time.perf_counter()
+        try:
+            out, status = _to_dict(self._call(res.body, headers)), 200
+        except Exception as e:
+            out, status = None, int(getattr(e, "status_code", 0) or 599)
+        return self.jit.resume(res, out, status, (time.perf_counter() - t0) * 1000)
 
     def _call(self, body: dict, headers: dict) -> Any:
         if self.sdk and headers:

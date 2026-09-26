@@ -360,9 +360,14 @@ class SimModel:
     def __init__(self, seed: int = 0, noise: float = 0.06) -> None:
         self.rng = random.Random(seed)
         self.noise = noise
-        self.calls = 0
+        self.calls = 0           # full calls
+        self.small_calls = 0     # treejit T2/T3 subcalls (forced treejit_* tool)
+        self.small_tokens = [0, 0]
 
     def __call__(self, body: dict) -> dict:
+        forced = (body.get("tool_choice") or {}).get("name", "")
+        if forced.startswith("treejit_"):
+            return self._subcall(body, forced)
         self.calls += 1
         msgs = body["messages"]
         task = msgs[0]["content"] if isinstance(msgs[0]["content"], str) else msgs[0]["content"][0]["text"]
@@ -385,6 +390,46 @@ class SimModel:
         return {"id": f"msg_{self.rng.randrange(16 ** 12):012x}", "type": "message", "role": "assistant",
                 "model": body.get("model", "sim"), "content": content, "stop_reason": stop, "stop_sequence": None,
                 "usage": {"input_tokens": prompt_chars // 4, "output_tokens": out_tokens}}
+
+    # ---------------------------------------------------------------- treejit subcalls
+    def _subcall(self, body: dict, tool: str) -> dict:
+        """Answer a T3 fill / T2 choose from the short prompt alone, with the same policy:
+        work out what it would do next and match that against the proposed call(s)."""
+        self.small_calls += 1
+        prompt = body["messages"][0]["content"]
+        try:
+            answer = self._subcall_answer(prompt, tool)
+        except Exception:  # a confused model: say nothing useful
+            answer = {"choice": 0} if tool == "treejit_choose" else {"not_this_step": True}
+        content = [{"type": "tool_use", "id": f"toolu_{self.rng.randrange(16 ** 20):020x}", "name": tool, "input": answer}]
+        prompt_chars = len(body.get("system", "")) + len(json.dumps(body.get("tools", []))) + len(json.dumps(body["messages"]))
+        usage = {"input_tokens": prompt_chars // 4, "output_tokens": len(json.dumps(content)) // 4 + 10}
+        self.small_tokens[0] += usage["input_tokens"]
+        self.small_tokens[1] += usage["output_tokens"]
+        return {"id": f"msg_{self.rng.randrange(16 ** 12):012x}", "type": "message", "role": "assistant",
+                "model": body.get("model", "sim"), "content": content, "stop_reason": "tool_use", "stop_sequence": None,
+                "usage": usage}
+
+    def _subcall_answer(self, prompt: str, tool: str) -> dict:
+        task = re.search(r"<task>\n(.*?)\n</task>", prompt, re.S).group(1)
+        results = {m.group(1): (m.group(3), m.group(2) == "true")
+                   for m in re.finditer(r'<result n="(\d+)" error="(true|false)">\n(.*?)\n</result>', prompt, re.S)}
+        hist = []
+        for m in re.finditer(r'<step n="(\d+)">(.*?)</step>', prompt):
+            st = json.loads(m.group(2))
+            hist.append((st["tool"], st["input"], *results.get(m.group(1), ("", False))))
+        if tool == "treejit_fill":
+            proposals = [(0, json.loads(re.search(r"^Next call: (.*)$", prompt, re.M).group(1)))]
+        else:
+            proposals = [(int(m.group(1)), json.loads(m.group(2)))
+                         for m in re.finditer(r"^(\d+)\. (\{.*\})  \(used in", prompt, re.M)]
+        names = {n for n, *_ in hist} | {p["tool"] for _, p in proposals}
+        action = self._coding(task, hist, "") if names & {"Bash", "Read", "Edit"} else self._retail(task, hist, "")
+        for n, p in proposals:
+            vals = _match_proposal(p, action)
+            if vals is not None:
+                return vals if tool == "treejit_fill" else {"choice": n, **{f"o{n}_{k}": v for k, v in vals.items()}}
+        return {"not_this_step": True} if tool == "treejit_fill" else {"choice": 0}
 
     # ---------------------------------------------------------------- coding policy
     def _coding(self, task: str, hist: list, hints: str) -> tuple[str, dict] | None:
@@ -474,6 +519,47 @@ class SimModel:
             return "return_delivered_order_items", {"order_id": oid, "item_ids": order["items"],
                                                     "payment_method_id": user["payment_methods"][0]["id"]}
         return "transfer_to_human_agents", {"summary": f"User {user['user_id']} wants to drop order {oid} (status {order['status']})."}
+
+
+_PH = re.compile(r"<([A-Za-z0-9_]+)>")
+
+
+def _match_proposal(prop: dict, action: tuple[str, dict] | None) -> dict | None:
+    """Placeholder values that turn the proposed call into `action`, or None if it's a different call."""
+    if action is None or prop["tool"] != action[0] or set(prop["input"]) != set(action[1]):
+        return None
+    out: dict[str, str] = {}
+    for k, tv in prop["input"].items():
+        av = action[1][k]
+        if not (isinstance(tv, str) and _PH.search(tv)):
+            if tv != av:
+                return None
+            continue
+        whole = _PH.fullmatch(tv)
+        if whole and not isinstance(av, str):
+            out[whole.group(1)] = json.dumps(av)
+            continue
+        if not isinstance(av, str):
+            return None
+        pattern, seen = "", set()
+        for i, part in enumerate(_PH.split(tv)):
+            if i % 2 == 0:
+                pattern += re.escape(part)
+            else:
+                pattern += f"(?P={part})" if part in seen else f"(?P<{part}>.+?)"
+                seen.add(part)
+        m = re.fullmatch(pattern, av, re.S)
+        if m is None:
+            return None
+        for name, val in m.groupdict().items():
+            if k == "command":  # the model gives plain values; treejit does the shell quoting
+                try:
+                    words = shlex.split(val)
+                    val = words[0] if len(words) == 1 else val
+                except ValueError:
+                    pass
+            out[name] = val
+    return out
 
 
 def make_task(rng: random.Random, i: int, family: str) -> tuple[str, str, Any, list, str]:
