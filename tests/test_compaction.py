@@ -128,6 +128,27 @@ def test_verified_replayed_step_is_compacted_and_harness_history_untouched(cjit)
     assert "compacted 1 obs/" in row["note"] and row["compacted_chars"] == len(module(5)) - len(read["content"])
 
 
+def test_compacted_block_list_keeps_cache_control(cjit):
+    """A tool_result whose content is a list of text blocks with a prompt-cache breakpoint on an inner
+    block: the digest replaces the list with one block, and the breakpoint moves onto it."""
+    msgs = replayed_conv(cjit)
+    ids = [u["id"] for u in uses(msgs)]
+    req = body_of(copy.deepcopy(msgs[:-1]))
+    mark = {"type": "ephemeral"}
+    for m in req["messages"]:
+        for b in m["content"] if isinstance(m["content"], list) else []:
+            if b.get("type") == "tool_result" and b["tool_use_id"] == ids[1]:
+                text = b["content"]
+                b["content"] = [{"type": "text", "text": text[:100]}, {"type": "text", "text": text[100:], "cache_control": mark}]
+    res = cjit.handle("anthropic", req, {"X-TreeJIT-Run": "probe-cc"})
+    [block] = results_by_id(res.body)[ids[1]]["content"]
+    assert block["type"] == "text" and block["text"].startswith("[treejit: replayed & verified step")
+    assert block["cache_control"] == mark
+    # without a breakpoint, none is invented
+    from treejit.compaction import _replace
+    assert _replace([{"type": "text", "text": "a"}], "d") == [{"type": "text", "text": "d"}]
+
+
 def test_unverified_and_model_chosen_steps_are_kept(cjit):
     msgs = replayed_conv(cjit)
     ids = [u["id"] for u in uses(msgs)]
