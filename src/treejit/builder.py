@@ -20,12 +20,12 @@ from typing import Any
 
 from .bindings import Sources, find_rule
 from .config import Config
-from .features import guard_holds, guard_of, learn_decision_list, obs_features, postcondition, task_words
+from .features import excess_negatives, guard_holds, guard_of, learn_decision_list, obs_features, postcondition, task_words
 from .model import Observation, Step, ToolCall
 from .policy import is_commit_point, is_readonly
 from .store import Store, dumps
 from .templates import anti_unify, call_slots, edge_id, label, shape_of, var_slots
-from .tree import contexts, node_id
+from .tree import END, contexts, node_id
 from .util import decay, now
 
 MAX_INSTANCES = 40  # most recent passing instances used for bindings/guards
@@ -44,6 +44,7 @@ class RunData:
     created: float
     updated: float
     outcome_at: float
+    ended_after: int | None = None    # the model gave its final answer after this many steps
     steps: list[Step] = field(default_factory=list)
     replayed: list[bool] = field(default_factory=list)
     eids: list[str] = field(default_factory=list)
@@ -73,7 +74,7 @@ def load_runs(store: Store, family: str, limit: int = 1_000_000) -> list[RunData
     rows = store.q("SELECT * FROM runs WHERE family=? ORDER BY created DESC LIMIT ?", (family, limit))
     for r in reversed(rows):
         runs[r["id"]] = RunData(r["id"], r["outcome"], r["reason"], r["task"] or "", r["task_hash"] or "",
-                                r["created"], r["updated"], r["outcome_at"] or r["updated"])
+                                r["created"], r["updated"], r["outcome_at"] or r["updated"], r["ended_after"])
     if not runs:
         return []
     for s in store.q("SELECT s.* FROM steps s JOIN runs r ON r.id=s.run_id WHERE r.family=? ORDER BY s.run_id, s.idx", (family,)):
@@ -152,6 +153,26 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
     for (nid, _), lst in inst.items():
         node_pass_n[nid] += sum(1 for rd, i in lst if rd.passed and not rd.replayed[i])
 
+    # The model's other choice: ending the episode. A passing run whose final answer came right
+    # after its last step puts an END choice at the contexts after that step. It counts toward
+    # the node's evidence (so purity and decision lists can say "the model stops here") but is
+    # never replayed: the final answer always comes from the model.
+    node_end: dict[str, int] = defaultdict(int)
+    ends: dict[str, list[RunData]] = defaultdict(list)
+    for rd in runs:
+        if not rd.passed or rd.ended_after != len(rd.steps):
+            continue
+        for kind, ctx in contexts(rd.eids, len(rd.steps), cfg):
+            nid = node_id(family, kind, ctx)
+            if evicted.get(nid, 0) >= rd.updated:
+                continue
+            node_meta[nid] = (kind, ctx)
+            node_runs[nid].add(rd.id)
+            node_seen[nid] = max(node_seen[nid], rd.updated)
+            node_end[nid] += 1
+            node_pass_n[nid] += 1
+            ends[nid].append(rd)
+
     # Side exits teach. A replayed step whose result broke the edge's postcondition is
     # a miss against the context that chose it; if the model then took over and the run
     # passed, its choice is what should have happened at that context (a correction).
@@ -178,6 +199,27 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
                 for nid in step_nodes.get((rd.id, i), []):
                     corr[(nid, rd.eids[i + 1])].append((rd, i))
                     node_pass_n[nid] += 1
+
+    # Failed replays teach too. A replayed step in a failed run is evidence against the decision
+    # that chose it, at the node that chose it: this input, this edge, bad outcome. Edge blame
+    # can't say that when the edge is right for other inputs (it is in pass_pairs), and replayed
+    # steps never become examples, so a wrong T0/T1 choice used to keep firing (seed 3: a
+    # task-word rule sent typo tasks down the delete-module branch in 28 runs). Negatives lower
+    # the edge's purity at that node and the decision-list rules predicting it on such inputs.
+    # A failed run also fails every *other* replayed step in it, so negatives only count beyond
+    # the failure rate tolerated among the same replays in passing runs (`excess_negatives`).
+    negs: dict[str, list[tuple[RunData, int, str]]] = defaultdict(list)
+    confs: dict[str, list[tuple[RunData, int, str]]] = defaultdict(list)
+    neg_n: dict[tuple[str, str], int] = defaultdict(int)
+    conf_n: dict[tuple[str, str], int] = defaultdict(int)
+    for rd in runs:
+        if rd.passed or rd.failed:
+            for i, st in enumerate(rd.steps):
+                if not rd.replayed[i] or not st.replayed_node:
+                    continue
+                for nid in step_nodes.get((rd.id, i), []):  # the deciding context and its siblings
+                    (negs if rd.failed else confs)[nid].append((rd, i, rd.eids[i]))
+                    (neg_n if rd.failed else conf_n)[(nid, rd.eids[i])] += 1
 
     # 3. credit assignment: first edge after the divergence point
     blame: dict[tuple[str, str], list[tuple[float, str, str | None, str]]] = defaultdict(list)
@@ -207,7 +249,9 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
         pass_runs = len({rd.id for rd, _ in passing})
         fail_runs = len({rd.id for rd, _ in lst if rd.failed})
         pass_n = sum(1 for rd, i in lst if rd.passed and not rd.replayed[i]) + len(corr.get((nid, eid), []))
-        purity = pass_n / node_pass_n[nid] if node_pass_n[nid] else 0.0
+        # share of the model's choices here, discounted by failed replays of this edge here
+        neg = excess_negatives(neg_n.get((nid, eid), 0), conf_n.get((nid, eid), 0), cfg.purity)
+        purity = pass_n / (node_pass_n[nid] + neg) if node_pass_n[nid] else 0.0
         bl = blame.get((nid, eid), [])
         f = sum(b[0] for b in bl)
         distinct = len({b[1] for b in bl})
@@ -272,17 +316,24 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
                 by_node[nid].append((rd, i, eid))
     for (nid, eid), lst in corr.items():
         by_node[nid].extend((rd, i, eid) for rd, i in lst)
+    for nid, lst in ends.items():
+        by_node[nid].extend((rd, len(rd.steps), END) for rd in lst)
+
+    def example(rd: RunData, i: int, eid: str) -> tuple[str, dict, str, set]:
+        text = rd.steps[i - 1].obs.text if i > 0 and rd.steps[i - 1].obs else ""
+        return (eid, rd.feats[i - 1] if i > 0 else {}, text, rd.words())
+
     for nid, (kind, ctx) in node_meta.items():
-        examples = [
-            (eid, rd.feats[i - 1] if i > 0 else {}, (rd.steps[i - 1].obs.text if i > 0 and rd.steps[i - 1].obs else ""), rd.words())
-            for rd, i, eid in by_node.get(nid, [])[-200:]
-        ]
-        stump = learn_decision_list(examples, cfg.purity) if len({e[0] for e in examples}) > 1 else None
+        examples = [example(rd, i, eid) for rd, i, eid in by_node.get(nid, [])[-200:]]
+        negatives = [example(rd, i, eid) for rd, i, eid in negs.get(nid, [])[-200:]]
+        confirmed = [example(rd, i, eid) for rd, i, eid in confs.get(nid, [])[-200:]] if negatives else []
+        stump = learn_decision_list(examples, cfg.purity, negatives=negatives, confirmed=confirmed) \
+            if len({e[0] for e in examples}) > 1 else None
         parent = via = None
         if kind == "r" and ctx:
             parent, via = node_id(family, "r", ctx[:-1]), ctx[-1]
         node_rows.append((nid, family, kind, dumps(list(ctx)), len(ctx), parent, via, len(node_runs[nid]),
-                          node_pass_n[nid], dumps(stump) if stump else None, node_seen[nid]))
+                          node_pass_n[nid], dumps(stump) if stump else None, node_seen[nid], node_end[nid]))
 
     edge_rows = [(eid_of[s], family, templates[s]["tool"], s, dumps(templates[s]), len(by_shape[s]), label(templates[s]))
                  for s in by_shape]
@@ -292,7 +343,8 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
         for table in ("edges", "nodes", "node_edges"):
             db.execute(f"DELETE FROM {table} WHERE family=?", (family,))
         db.executemany("INSERT INTO edges VALUES(?,?,?,?,?,?,?)", edge_rows)
-        db.executemany("INSERT INTO nodes VALUES(?,?,?,?,?,?,?,?,?,?,?)", node_rows)
+        db.executemany("INSERT INTO nodes(id, family, kind, ctx, depth, parent, via, n_runs, n_pass, stump, last_seen, n_end) "
+                       "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", node_rows)
         db.executemany(f"INSERT INTO node_edges({','.join(NE_COLS)}) VALUES({','.join('?' * len(NE_COLS))})", ne_rows)
         db.execute("UPDATE families SET built_at=?, dirty=0 WHERE id=?", (t_now, family))
     return {"family": family, "runs": len(runs), "edges": len(edge_rows), "nodes": len(node_rows),

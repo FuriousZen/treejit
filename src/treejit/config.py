@@ -39,6 +39,7 @@ class Config:
     max_depth: int = 12            # D: root-anchored path depth; deeper steps use n-gram anchors only
     ngram: tuple = (3, 2, 1)       # last-k-edge macro contexts, most specific first
     purity: float = 0.8            # min share of evidence a child needs to be chosen
+    task_rule_support: int = 5     # model-chosen examples a task-word branch rule needs before T1 replays on it
     # replay bounds
     theta: float = 0.5             # confidence budget: product of edge confidences must stay above
     hard_cap: int = 8              # K: max consecutive replayed steps

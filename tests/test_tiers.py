@@ -193,9 +193,12 @@ def test_t2_resolves_ambiguous_node(jit):
     assert calls_of(down)[1] == ("Read", {"file_path": "status/log"})
     assert replayed_ids(ok)[1].endswith("_t2") and replayed_ids(down)[1].endswith("_t2")
     assert model.calls - before == 2  # final answers only
-    # 3 small calls: after Read(status/log) the one-edge n-gram context [Read] is ambiguous too,
-    # the model answers 0 ("something else") and finishes at T4. The tree has no "stop" edge.
-    assert model.small == 3
+    # 2 small calls, one per task. After Read(status/log) the one-edge n-gram context [Read] is
+    # ambiguous too, but the root path there has only seen the model end the episode (END), so the
+    # final answer goes straight to T4 without a wasted "something else" subcall.
+    assert model.small == 2
+    end_notes = [r["note"] for r in jit.store.q("SELECT note FROM requests WHERE run_id LIKE 'x-%' AND tier='T4'")]
+    assert end_notes and all(n.startswith("end@") for n in end_notes)
     sub = model.sub_bodies[0]
     assert sub["tool_choice"]["name"] == CHOOSE_TOOL and "(used in 3 earlier successful runs)" in sub["messages"][0]["content"]
     # a T2 pick is the model's choice: it is logged as such, so it feeds the node's evidence

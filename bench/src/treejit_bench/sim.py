@@ -561,7 +561,10 @@ class SimModel:
             if not reads:
                 return "Read", {"file_path": "pyproject.toml"}
             if not any(n == "Edit" for n, _ in done):
-                cur = re.search(r'version = "([^"]+)"', reads[-1]).group(1)
+                m_cur = re.search(r'version = "([^"]+)"', reads[-1])
+                if m_cur is None:
+                    return None  # pyproject.toml is gone (e.g. deleted by a misrouted step): give up
+                cur = m_cur.group(1)
                 return "Edit", {"file_path": "pyproject.toml", "old_string": f'version = "{cur}"', "new_string": f'version = "{v}"'}
             if not tested:
                 return "Bash", {"command": "python -m pytest -q"}

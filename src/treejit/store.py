@@ -20,7 +20,7 @@ CREATE INDEX IF NOT EXISTS families_tools ON families(tools_hash);
 
 CREATE TABLE IF NOT EXISTS runs(
   id TEXT PRIMARY KEY, family TEXT, task TEXT, task_hash TEXT, created REAL, updated REAL,
-  n_steps INTEGER DEFAULT 0, outcome TEXT, reason TEXT, outcome_at REAL);
+  n_steps INTEGER DEFAULT 0, outcome TEXT, reason TEXT, outcome_at REAL, ended_after INTEGER);
 CREATE INDEX IF NOT EXISTS runs_family ON runs(family);
 
 CREATE TABLE IF NOT EXISTS steps(
@@ -41,7 +41,7 @@ CREATE INDEX IF NOT EXISTS edges_family ON edges(family);
 
 CREATE TABLE IF NOT EXISTS nodes(
   id TEXT PRIMARY KEY, family TEXT, kind TEXT, ctx TEXT, depth INTEGER, parent TEXT, via TEXT,
-  n_runs INTEGER, n_pass INTEGER, stump TEXT, last_seen REAL);
+  n_runs INTEGER, n_pass INTEGER, stump TEXT, last_seen REAL, n_end INTEGER DEFAULT 0);
 CREATE INDEX IF NOT EXISTS nodes_family ON nodes(family);
 
 CREATE TABLE IF NOT EXISTS node_edges(
@@ -87,6 +87,13 @@ class Store:
         cols = {r["name"] for r in self.db.execute("PRAGMA table_info(requests)").fetchall()}
         if "compacted_chars" not in cols:
             self.db.execute("ALTER TABLE requests ADD COLUMN compacted_chars INTEGER DEFAULT 0")
+        cols = {r["name"] for r in self.db.execute("PRAGMA table_info(runs)").fetchall()}
+        if "ended_after" not in cols:
+            self.db.execute("ALTER TABLE runs ADD COLUMN ended_after INTEGER")
+        cols = {r["name"] for r in self.db.execute("PRAGMA table_info(nodes)").fetchall()}
+        if "n_end" not in cols:
+            self.db.execute("ALTER TABLE nodes ADD COLUMN n_end INTEGER DEFAULT 0")
+            self.db.execute("UPDATE families SET dirty=1")
 
     def close(self) -> None:
         self.db.close()
@@ -139,6 +146,10 @@ class Store:
             )
             n = first_idx + len(rows)
             self.db.execute("UPDATE runs SET n_steps=MAX(n_steps, ?), updated=? WHERE id=?", (n, t, run_id))
+
+    def set_ended(self, run_id: str, n_steps: int) -> None:
+        """The model ended the episode (a final answer, no tool call) after `n_steps` steps."""
+        self.x("UPDATE runs SET ended_after=? WHERE id=?", (n_steps, run_id))
 
     def steps(self, run_id: str) -> list[sqlite3.Row]:
         return self.q("SELECT * FROM steps WHERE run_id=? ORDER BY idx", (run_id,))
