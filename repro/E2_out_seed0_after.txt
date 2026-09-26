@@ -1,0 +1,21 @@
+full(T4)      coding  n=130   sys=  1145ch tools=   634ch msgs=  4225ch (max 5424) in_tok=  1501 out_tok=  56
+full(T4)      retail  n=127   sys=  1133ch tools=  1261ch msgs=  1741ch (max 1970) in_tok=  1033 out_tok=  58
+small(T2/T3)  coding  n=130   sys=   336ch tools=     2ch msgs=  1927ch (max 3414) in_tok=   657 out_tok=  28
+small(T2/T3)  retail  n=2     sys=   342ch tools=     2ch msgs=   984ch (max 1150) in_tok=   396 out_tok=  21
+baseline      coding  n=744   sys=  1145ch tools=   634ch msgs=  2553ch (max 5591) in_tok=  1083 out_tok=  69
+baseline      retail  n=505   sys=  1133ch tools=  1261ch msgs=   936ch (max 1906) in_tok=   832 out_tok=  71
+
+small/full input ratio (sim): 0.51
+
+Re-priced totals over all tasks (input-token equivalents, output x5):
+scenario                                         baseline   treejit+ok    cut small share small/full
+sim as-is (sys+tools from sim)                      8,315        2,522  69.7%       20.7%      0.510
+tau-bench-like (1.5k sys + 3.5k tools)             36,374        8,278  77.2%        6.3%      0.131
+tau-bench-like, cached                              6,507        2,380  63.4%       22.0%      0.549
+Claude Code (12k sys + 12k tools)                 155,029       32,693  78.9%        1.6%      0.032
+Claude Code, cached                                18,591        5,040  72.9%       10.4%      0.226
+small call / the T4 it replaced, sim            : mean 0.549  median 0.473
+small call / the T4 it replaced, tau-bench-like : mean 0.116  median 0.108
+small call / the T4 it replaced, Claude Code    : mean 0.027  median 0.026
+
+full calls=257 small calls=132 over 200 tasks

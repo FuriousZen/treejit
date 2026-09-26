@@ -5,6 +5,10 @@ read steps a real agent makes (authenticate, get_user_details, get_order_details
 emits Anthropic-format tool calls, and ends with a final text answer containing task.outputs.
 tau-bench's own Env.step executes tools; Env.calculate_reward (data-hash + outputs) scores.
 
+Historical: the prototype behind PLAN E1/B1, written against the base commit 19a53f5. Superseded by
+`python -m treejit_bench --suite taubench` (bench/src/treejit_bench/taubench.py). Subcall detection was
+updated to treejit.subcalls.subcall_tool/answer_content so it still runs on the current code.
+
 usage: python E1_tau_proto.py [--split test|train] [--n 5] [--modes baseline,treejit,treejit+ok] [--noise 0.05]
 """
 from __future__ import annotations
@@ -20,7 +24,7 @@ import time
 import types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path[:0] = [os.path.join(HERE, "E1_tau-bench"), os.path.join(HERE, "E1_deps"), "/home/user/treejit/src", "/home/user/treejit/bench/src"]
+sys.path[:0] = [os.path.join(HERE, "E1_tau-bench"), os.path.join(HERE, "E1_deps"), os.path.join(HERE, "..", "src"), os.path.join(HERE, "..", "bench", "src")]
 _ll = types.ModuleType("litellm")          # tau_bench.envs.user imports litellm at module level; never called here
 _ll.completion = lambda **kw: (_ for _ in ()).throw(RuntimeError("no LLM in this run"))
 sys.modules["litellm"] = _ll
@@ -29,6 +33,7 @@ from tau_bench.envs.retail.data import load_data  # noqa: E402
 from tau_bench.envs.retail.env import MockRetailDomainEnv  # noqa: E402
 from tau_bench.types import Action, RESPOND_ACTION_NAME  # noqa: E402
 from treejit import TreeJIT  # noqa: E402
+from treejit.subcalls import answer_content, subcall_tool  # noqa: E402
 from treejit.util import now  # noqa: E402
 from treejit_bench.sim import _history, _match_proposal  # noqa: E402
 
@@ -114,18 +119,20 @@ class OracleModel:
         return None
 
     def __call__(self, body: dict) -> dict:
-        forced = (body.get("tool_choice") or {}).get("name", "")
+        forced = subcall_tool(body)  # T2/T3 subcall: structured outputs (output_config.format) or a forced tool
         msgs = body["messages"]
-        if forced.startswith("treejit_"):
+        if forced:
             self.small_calls += 1
             ans = self._sub(msgs[0]["content"], forced)
-            content = [{"type": "tool_use", "id": f"toolu_{self.rng.randrange(16 ** 20):020x}", "name": forced, "input": ans}]
-            chars = len(body.get("system", "")) + len(json.dumps(body.get("tools", []))) + len(json.dumps(msgs))
+            content = answer_content(body, ans, f"toolu_{self.rng.randrange(16 ** 20):020x}")
+            chars = (len(body.get("system", "")) + len(json.dumps(body.get("tools", []))) + len(json.dumps(msgs))
+                     + (len(json.dumps(body["output_config"])) if "output_config" in body else 0))
             usage = {"input_tokens": chars // 4, "output_tokens": len(json.dumps(content)) // 4 + 10}
             self.small_tokens[0] += usage["input_tokens"]
             self.small_tokens[1] += usage["output_tokens"]
             return {"id": "msg_x", "type": "message", "role": "assistant", "model": "oracle", "content": content,
-                    "stop_reason": "tool_use", "stop_sequence": None, "usage": usage}
+                    "stop_reason": "tool_use" if content[0]["type"] == "tool_use" else "end_turn",
+                    "stop_sequence": None, "usage": usage}
         self.calls += 1
         task_text = msgs[0]["content"] if isinstance(msgs[0]["content"], str) else msgs[0]["content"][0]["text"]
         act = self.next_action(task_text, _history(msgs))

@@ -17,6 +17,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tests"))
 from cache_model import bill  # noqa: E402
 
+from treejit.subcalls import subcall_tool  # noqa: E402
 from treejit_bench import runner, sim  # noqa: E402
 
 
@@ -26,7 +27,7 @@ def capture(mode, seed, tasks, bigsys, **overrides):
     pad = "static instructions line\n" * (62500 // 24) if bigsys else ""
 
     def call(self, body):
-        if not (body.get("tool_choice") or {}).get("name", "").startswith("treejit_"):
+        if not subcall_tool(body):  # skip T2/T3 subcalls (structured outputs or a forced tool)
             b = copy.deepcopy(body)
             if pad:
                 b["system"] = pad + (b.get("system") or "")

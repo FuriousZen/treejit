@@ -2,10 +2,13 @@
 -> the subcall's request row keeps run_id NULL, so `explain` drops its tokens."""
 from __future__ import annotations
 
+import os
 import sys
 
-sys.path[:0] = ["/home/user/treejit/src", "/home/user/treejit/bench/src"]
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path[:0] = [os.path.join(_ROOT, "src"), os.path.join(_ROOT, "bench", "src")]
 from treejit import TreeJIT, operate  # noqa: E402
+from treejit.subcalls import answer_content, subcall_tool  # noqa: E402
 
 TOOLS = [{"name": "Bash", "description": "run", "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}}}]
 SYSTEM = "You are an agent.\n" * 5
@@ -13,12 +16,13 @@ n_small = {"n": 0}
 
 
 def model(body):
-    forced = (body.get("tool_choice") or {}).get("name", "")
+    forced = subcall_tool(body)  # structured outputs (output_config.format) or a forced tool, per model
     if forced == "treejit_choose":
         n_small["n"] += 1
-        return {"id": "m", "type": "message", "role": "assistant", "model": "x", "stop_reason": "tool_use",
-                "content": [{"type": "tool_use", "id": f"toolu_s{n_small['n']}", "name": forced, "input": {"choice": 0}}],
-                "usage": {"input_tokens": 300, "output_tokens": 20}}
+        content = answer_content(body, {"choice": 0}, f"toolu_s{n_small['n']}")
+        return {"id": "m", "type": "message", "role": "assistant", "model": "x",
+                "stop_reason": "tool_use" if content[0]["type"] == "tool_use" else "end_turn",
+                "content": content, "usage": {"input_tokens": 300, "output_tokens": 20}}
     msgs = body["messages"]
     task = msgs[0]["content"]
     n = sum(1 for m in msgs if m["role"] == "assistant")

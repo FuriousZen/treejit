@@ -8,7 +8,7 @@
       "tokens_per_task": 5582.7,
       "served_pct": 0.0,
       "success_pct": 90.0,
-      "wall_s_per_task": 9.38787,
+      "wall_s_per_task": 9.38747,
       "side_exits": 0,
       "compacted_chars_per_task": 0.0
     },
@@ -20,7 +20,7 @@
       "tokens_per_task": 7396.2,
       "served_pct": 0.0,
       "success_pct": 90.0,
-      "wall_s_per_task": 11.22498,
+      "wall_s_per_task": 11.22499,
       "side_exits": 0,
       "compacted_chars_per_task": 0.0
     },
@@ -32,7 +32,7 @@
       "tokens_per_task": 6196.18,
       "served_pct": 0.0,
       "success_pct": 96.0,
-      "wall_s_per_task": 9.959459999999996,
+      "wall_s_per_task": 9.959189999999994,
       "side_exits": 0,
       "compacted_chars_per_task": 0.0
     }
@@ -43,10 +43,10 @@
       "n": 10,
       "calls_per_task": 4.2,
       "small_calls_per_task": 0.1,
-      "tokens_per_task": 4685.7,
+      "tokens_per_task": 4683.6,
       "served_pct": 34.69387755102041,
       "success_pct": 100.0,
-      "wall_s_per_task": 7.011710000000001,
+      "wall_s_per_task": 6.98752,
       "side_exits": 1,
       "compacted_chars_per_task": 0.0
     },
@@ -55,10 +55,10 @@
       "n": 10,
       "calls_per_task": 4.9,
       "small_calls_per_task": 0.0,
-      "tokens_per_task": 6564.9,
+      "tokens_per_task": 6740.9,
       "served_pct": 37.096774193548384,
       "success_pct": 100.0,
-      "wall_s_per_task": 8.07796,
+      "wall_s_per_task": 8.07887,
       "side_exits": 0,
       "compacted_chars_per_task": 0.0
     },
@@ -67,10 +67,10 @@
       "n": 50,
       "calls_per_task": 3.7,
       "small_calls_per_task": 0.14,
-      "tokens_per_task": 4820.36,
+      "tokens_per_task": 4931.9,
       "served_pct": 48.47328244274809,
       "success_pct": 100.0,
-      "wall_s_per_task": 6.256234,
+      "wall_s_per_task": 6.222005999999999,
       "side_exits": 0,
       "compacted_chars_per_task": 0.0
     }
@@ -80,11 +80,11 @@
       "range": "1-10",
       "n": 10,
       "calls_per_task": 4.1,
-      "small_calls_per_task": 0.1,
-      "tokens_per_task": 4611.3,
+      "small_calls_per_task": 0.2,
+      "tokens_per_task": 4655.2,
       "served_pct": 38.0,
       "success_pct": 100.0,
-      "wall_s_per_task": 6.83617,
+      "wall_s_per_task": 6.900410000000001,
       "side_exits": 2,
       "compacted_chars_per_task": 0.0
     },
@@ -93,22 +93,22 @@
       "n": 10,
       "calls_per_task": 1.1,
       "small_calls_per_task": 0.8,
-      "tokens_per_task": 2168.8,
+      "tokens_per_task": 2152.3,
       "served_pct": 98.38709677419355,
       "success_pct": 100.0,
-      "wall_s_per_task": 2.5424900000000004,
+      "wall_s_per_task": 2.3624800000000006,
       "side_exits": 0,
       "compacted_chars_per_task": 0.0
     },
     "last": {
       "range": "151-200",
       "n": 50,
-      "calls_per_task": 1.06,
-      "small_calls_per_task": 0.9,
-      "tokens_per_task": 2037.66,
-      "served_pct": 98.85496183206106,
+      "calls_per_task": 1.02,
+      "small_calls_per_task": 0.92,
+      "tokens_per_task": 1999.54,
+      "served_pct": 99.61832061068702,
       "success_pct": 100.0,
-      "wall_s_per_task": 2.581892,
+      "wall_s_per_task": 2.3397439999999996,
       "side_exits": 0,
       "compacted_chars_per_task": 0.0
     }
@@ -118,37 +118,37 @@
       "range": "1-10",
       "n": 10,
       "calls_per_task": 4.1,
-      "small_calls_per_task": 0.1,
-      "tokens_per_task": 4540.5,
+      "small_calls_per_task": 0.2,
+      "tokens_per_task": 4655.2,
       "served_pct": 38.0,
       "success_pct": 100.0,
-      "wall_s_per_task": 6.83517,
+      "wall_s_per_task": 6.901460000000001,
       "side_exits": 2,
-      "compacted_chars_per_task": 258.9
+      "compacted_chars_per_task": 0.0
     },
     "mid": {
       "range": "41-50",
       "n": 10,
       "calls_per_task": 1.1,
       "small_calls_per_task": 0.8,
-      "tokens_per_task": 2104.8,
+      "tokens_per_task": 1941.0,
       "served_pct": 98.38709677419355,
       "success_pct": 100.0,
-      "wall_s_per_task": 2.5441299999999996,
+      "wall_s_per_task": 2.36151,
       "side_exits": 0,
-      "compacted_chars_per_task": 246.9
+      "compacted_chars_per_task": 775.8
     },
     "last": {
       "range": "151-200",
       "n": 50,
-      "calls_per_task": 1.06,
-      "small_calls_per_task": 0.9,
-      "tokens_per_task": 1980.96,
-      "served_pct": 98.85496183206106,
+      "calls_per_task": 1.02,
+      "small_calls_per_task": 0.92,
+      "tokens_per_task": 1847.8,
+      "served_pct": 99.61832061068702,
       "success_pct": 100.0,
-      "wall_s_per_task": 2.582602000000001,
+      "wall_s_per_task": 2.339102,
       "side_exits": 0,
-      "compacted_chars_per_task": 218.0
+      "compacted_chars_per_task": 561.5
     }
   }
 }

@@ -501,7 +501,7 @@ class SimModel:
         self.rng = random.Random(seed)
         self.noise = noise
         self.calls = 0           # full calls
-        self.small_calls = 0     # treejit T2/T3 subcalls (forced treejit_* tool)
+        self.small_calls = 0     # treejit T2/T3 subcalls (subcalls.subcall_tool)
         self.small_tokens = [0, 0]
         self.usage = UsageModel(payload, cache)
 
