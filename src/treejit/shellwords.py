@@ -113,16 +113,13 @@ def _read_word(s: str, i: int) -> tuple[str, int]:
             continue
         if c == "$" and i + 1 < n and s[i + 1] == "'":
             j = i + 2
-            buf = []
             while j < n and s[j] != "'":
-                if s[j] == "\\" and j + 1 < n:
-                    buf.append(_ansi_escape(s[j + 1]))
-                    j += 2
-                else:
-                    buf.append(s[j])
-                    j += 1
-            out.append("".join(buf))
+                j += 2 if s[j] == "\\" else 1
+            out.append(ansi_c(s[i + 2 : min(j, n)]))
             i = j + 1
+            continue
+        if c == "$" and i + 1 < n and s[i + 1] == '"':
+            i += 1  # $"..." (locale translation) cooks like "..."
             continue
         if c == '"':
             j = i + 1
@@ -161,8 +158,45 @@ def _read_word(s: str, i: int) -> tuple[str, int]:
     return "".join(out), i
 
 
-def _ansi_escape(c: str) -> str:
-    return {"n": "\n", "t": "\t", "r": "\r", "0": "\0"}.get(c, c)
+_ANSI_SIMPLE = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t",
+                "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
+_OCT = re.compile(r"[0-7]{1,3}")
+_HEX = {"x": re.compile(r"[0-9A-Fa-f]{1,2}"), "u": re.compile(r"[0-9A-Fa-f]{1,4}"),
+        "U": re.compile(r"[0-9A-Fa-f]{1,8}")}
+
+
+def ansi_c(body: str) -> str:
+    r"""Decode the body of a bash `$'...'` word as bash does: \a \b \e \E \f \n \r \t \v \\ \' \" \?,
+    \NNN (octal), \xHH, \uHHHH, \UHHHHHHHH and \cX. Any other escape stays as written, and a NUL
+    ends the word (bash truncates there)."""
+    out: list[str] = []
+    i, n = 0, len(body)
+    while i < n:
+        c = body[i]
+        if c != "\\" or i + 1 >= n:
+            out.append(c)
+            i += 1
+            continue
+        d = body[i + 1]
+        m = _OCT.match(body, i + 1)
+        hx = _HEX[d].match(body, i + 2) if d in _HEX else None
+        if d in _ANSI_SIMPLE:
+            out.append(_ANSI_SIMPLE[d])
+            i += 2
+        elif m:
+            out.append(chr(int(m.group(), 8) & 0xFF))
+            i = m.end()
+        elif hx:
+            code = int(hx.group(), 16)
+            out.append(chr(code) if code <= 0x10FFFF and not 0xD800 <= code <= 0xDFFF else "�")
+            i = hx.end()
+        elif d == "c" and i + 2 < n:
+            out.append(chr(ord(body[i + 2]) & 0x1F))
+            i += 3
+        else:
+            out.append(c + d)
+            i += 2
+    return "".join(out).split("\0", 1)[0]
 
 
 def _skip_backtick(s: str, i: int) -> int:
@@ -350,6 +384,32 @@ def unwrap(words: list[str]) -> tuple[int, bool, list[int]]:
     return i, clean, wrappers
 
 
+# Reserved words that may precede a command in a simple-command segment (`if git push; then`,
+# `{ git push; }`, `! git push`, `do git push; done`). Only unquoted ones are keywords.
+KEYWORDS = {"{", "}", "!", "if", "then", "elif", "else", "fi", "do", "done", "while", "until", "esac", "coproc"}
+
+
+def skip_keywords(words: list[str], raws: list[str] | None = None) -> int:
+    """Index of the first word after leading reserved words (and `function NAME`)."""
+    raws = words if raws is None else raws
+    i = 0
+    while i < len(words) and raws[i] == words[i]:
+        if words[i] in KEYWORDS:
+            i += 1
+        elif words[i] == "function" and i + 1 < len(words):
+            i += 2
+        else:
+            break
+    return i
+
+
+def program_index(words: list[str], raws: list[str] | None = None) -> tuple[int, bool, list[int]]:
+    """`unwrap` after leading reserved words: (program index, clean, wrapper indices)."""
+    k = skip_keywords(words, raws)
+    start, clean, wrappers = unwrap(words[k:])
+    return start + k, clean, [w + k for w in wrappers]
+
+
 def command_heads(cmd: str) -> list[str]:
     """Structural signature of a shell command: the program (+ subcommand) of each segment.
 
@@ -358,8 +418,8 @@ def command_heads(cmd: str) -> list[str]:
     heads = []
     for seg in segments(tokenize(cmd)):
         words = [t for t in seg if not t.op]
-        # skip env assignments and transparent wrappers: the same view the policy uses
-        words = words[unwrap([t.val for t in words])[0]:]
+        # skip reserved words, env assignments and transparent wrappers: the same view the policy uses
+        words = words[program_index([t.val for t in words], [cmd[t.start : t.end] for t in words])[0]:]
         if not words:
             continue
         prog = words[0].val.rsplit("/", 1)[-1] if "/" in words[0].val and not words[0].val.startswith(".") else words[0].val

@@ -77,6 +77,8 @@ class NodeEdge:
     latency_ms: float
     score: float
     fillable: bool = False  # replayable once its holes are filled (T3)
+    commit_reason: str = ""  # why its reference call is a commit point ('' = it isn't); see policy.commit_reason
+    approved: bool = False   # an operator approval covers it (it may replay without being read-only)
 
     @classmethod
     def from_row(cls, r: Any) -> "NodeEdge":
@@ -86,7 +88,7 @@ class NodeEdge:
             json.loads(r["bindings"] or "{}"), json.loads(r["holes"] or "[]"), json.loads(r["guard"] or "{}"),
             json.loads(r["post"] or "{}"), json.loads(r["ref"] or "{}"), json.loads(r["reasons"] or "[]"),
             bool(r["commit_point"]), r["savings"] or 0.0, r["latency_ms"] or 0.0, r["score"] or 0.0,
-            bool(r["fillable"]),
+            bool(r["fillable"]), r["commit_reason"] or "", bool(r["approved"]),
         )
 
 

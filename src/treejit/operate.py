@@ -16,7 +16,8 @@ MIN_PREFIX = 4     # shortest prefix accepted on input
 
 # where ids of each kind live; operator tables count so revoke/unpin work after eviction
 ID_SOURCES = {
-    "edge": ("SELECT id FROM edges", "SELECT edge FROM approvals", "SELECT edge FROM pins WHERE edge<>''"),
+    "edge": ("SELECT id FROM edges", "SELECT edge FROM approvals", "SELECT edge FROM pins WHERE edge<>''",
+             "SELECT edge FROM not_commit"),
     "node": ("SELECT id FROM nodes", "SELECT node FROM pins", "SELECT node FROM approvals WHERE node<>''"),
     "family": ("SELECT id FROM families",),
     "run": ("SELECT id FROM runs",),
@@ -81,7 +82,7 @@ def pending(store: Store, cfg: Config, family: str | None = None) -> list[dict]:
         if it is None:
             it = by_edge[eid] = {
                 "edge": eid, "family": r["family"], "tool": r["tool"], "label": r["label"],
-                "commit_point": False, "approved_everywhere": (eid, "") in approvals or ("*", "") in approvals,
+                "commit_point": False, "commit_reason": "", "approved_everywhere": (eid, "") in approvals or ("*", "") in approvals,
                 "pass_runs": 0, "fail_runs": 0, "example": "", "nodes": [],
             }
         commit = bool(r["commit_point"])
@@ -92,6 +93,7 @@ def pending(store: Store, cfg: Config, family: str | None = None) -> list[dict]:
             "needs_more_passing_runs": need,
         })
         it["commit_point"] = it["commit_point"] or commit
+        it["commit_reason"] = it["commit_reason"] or (r["commit_reason"] or "" if commit else "")
         if r["pass_runs"] > it["pass_runs"] or not it["example"]:
             it["pass_runs"], it["fail_runs"] = r["pass_runs"], r["fail_runs"]
             it["example"] = compact_call(r["tool"], r["ref"] or "{}")
@@ -116,7 +118,8 @@ def pending_text(items: list[dict]) -> str:
         return "nothing pending: no promoted edge is waiting on approval"
     out = []
     for it in items:
-        flags = ["COMMIT POINT"] if it["commit_point"] else ["write"]
+        flags = [f"COMMIT POINT: {it['commit_reason']}" if it.get("commit_reason") else "COMMIT POINT"] \
+            if it["commit_point"] else ["write"]
         if not it["needs_approval"]:
             flags.append("approved")
         out.append(f"edge {it['edge'][:SHORT]}  {it['tool']}  [{', '.join(flags)}]  pass={it['pass_runs']} fail={it['fail_runs']}"
@@ -133,12 +136,21 @@ def pending_text(items: list[dict]) -> str:
             first = next(n for n in it["nodes"] if n["blocked"] == "needs_approval")
             out.append(f"  approve here:       treejit approve {it['edge'][:SHORT]} --node {first['node'][:SHORT]}")
             out.append(f"  approve everywhere: treejit approve {it['edge'][:SHORT]}")
+        if it["commit_point"]:
+            out.append(f"  only local effects:  treejit approve {it['edge'][:SHORT]} --not-commit")
         out.append("")
     return "\n".join(out).rstrip()
 
 
-def approve(store: Store, edge: str, node: str = "") -> None:
+def approve(store: Store, edge: str, node: str = "", not_commit: bool = False) -> None:
+    """Approve an edge (at one node, or everywhere). `not_commit` also declares the edge not a commit
+    point, for opaque executors whose effects the operator knows are local (`./run_tests.sh`); it is
+    per edge and never implied by approving '*'."""
+    if not_commit and edge == "*":
+        raise ValueError("not_commit needs a specific edge")
     store.x("INSERT OR REPLACE INTO approvals(edge, node, ts) VALUES(?,?,?)", (edge, node, now()))
+    if not_commit:
+        store.x("INSERT OR REPLACE INTO not_commit(edge, ts) VALUES(?,?)", (edge, now()))
 
 
 def review(store: Store, cfg: Config, family: str | None, inp: TextIO, out: TextIO) -> list[tuple[str, str]]:

@@ -25,7 +25,7 @@ from .config import Config
 from .dialects import Dialect
 from .features import eval_decision_list, guard_holds, obs_features, rule_resembles, task_words
 from .model import NormRequest, ToolCall
-from .policy import is_commit_point, is_readonly
+from .policy import commit_reason, is_readonly, repo_taint, untrusted
 from .templates import Val, call_slots, render
 from .tree import END, EdgeInfo, NodeEdge, TreeView, contexts, node_id
 
@@ -45,6 +45,7 @@ class Option:
     conf: float = 1.0
     tier: str = ""                    # how the structure was chosen (T0/T1), for fills
     args: dict | None = None          # rendered, when there are no holes
+    tainted: str = ""                 # why this run stopped trusting the repository's config ('' = it didn't)
 
 
 @dataclass
@@ -150,8 +151,13 @@ def materialize(view: TreeView, cfg: Config, opt: Option, filled: dict[str, Val]
     tool = opt.edge.tool
     if is_readonly(tool, opt.ne.ref, cfg) and not is_readonly(tool, args, cfg):
         return None, "unsafe_args"
-    if is_commit_point(tool, args, cfg) and not opt.ne.commit_point:
-        return None, "commit_point"
+    # the rendered call must be a commit point for the same reason as the edge's reference call:
+    # a value can't turn `make test` into `make deploy`, or `sh -c 'echo hi'` into a push
+    if commit_reason(tool, args, cfg) != opt.ne.commit_reason:
+        return None, "commit_reason"
+    # once a call in the run rewrote what git reads, git reads need an approval (see policy.repo_taint)
+    if opt.tainted and not opt.ne.approved and not is_readonly(tool, args, untrusted(cfg)):
+        return None, "repo_tainted"
     if filled is not None and view.match(ToolCall("", tool, args))[0] != opt.edge.id:
         return None, "shape_changed"
     return args, ""
@@ -176,6 +182,7 @@ def option(view: TreeView, cfg: Config, ne: NodeEdge, S: Sources, holes_ok: bool
         else:
             holes.append(slot)
     opt = Option(ne, view.edges[ne.edge], values, holes)
+    opt.tainted = next((w for w in (repo_taint(c.name, c.args, cfg) for c in S.calls) if w), "")
     if holes:
         return (opt, "") if holes_ok else (None, f"unbound:{holes[0]}")
     opt.args, why = materialize(view, cfg, opt)

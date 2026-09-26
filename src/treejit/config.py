@@ -28,7 +28,11 @@ DEFAULT_COMMIT_COMMANDS = [
     "git push", "npm publish", "pnpm publish", "yarn publish", "cargo publish", "twine upload",
     "gh pr", "gh release", "docker push", "kubectl apply", "kubectl delete", "terraform apply",
     "curl", "wget", "scp", "rsync", "ssh",
+    "poetry publish", "uv publish", "hatch publish", "flit publish", "bun publish", "gem push", "dotnet nuget push",
+    "helm push", "terraform destroy", "terraform import", "pulumi up", "pulumi destroy", "sftp", "ftp",
 ]
+# Beyond these patterns, policy.commit_reason treats opaque executors (interpreters, shells, scripts,
+# task runners, package scripts, git aliases, gh writes, cloud CLIs) as commit points; see README.
 
 
 @dataclass
@@ -72,6 +76,11 @@ class Config:
     commit_tools: list = field(default_factory=lambda: list(DEFAULT_COMMIT_TOOLS))
     commit_commands: list = field(default_factory=lambda: list(DEFAULT_COMMIT_COMMANDS))
     extra_readonly_commands: list = field(default_factory=list)
+    # git reads (status, diff, log, show, blame, ...) run programs the repository's own config and
+    # .gitattributes name (core.fsmonitor, diff.external, textconv, filters). True: the checkout is
+    # trusted, git reads are read-only (a run that rewrites git config/metadata still loses that for
+    # its remaining steps). False: git reads need operator approval like any write.
+    trust_repo_config: bool = True
     # proxy
     host: str = "127.0.0.1"
     port: int = 8787

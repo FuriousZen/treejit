@@ -214,7 +214,7 @@ def test_migrates_old_node_edges_schema(tmp_path):
     con.close()
     jit = TreeJIT(db)
     cols = [r["name"] for r in jit.store.q("PRAGMA table_info(node_edges)")]
-    assert cols[-1] == "blocked"
+    assert {"fillable", "blocked", "commit_reason", "approved"} <= set(cols)
     assert jit.store.q1("SELECT dirty FROM families WHERE id='fam1'")["dirty"] == 1
     assert jit.store.q1("SELECT tier, blocked FROM node_edges")["tier"] == "hot"
     jit.close()
