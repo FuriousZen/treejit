@@ -129,3 +129,16 @@ Measured at `6e1177f` (all of waves A–C merged). Sim: `python -m treejit_bench
 | E2 | W9 | `--payload`, `--cache`; default output unchanged | First-order cache model. |
 | E3 | W9 | small-calls panel in `docs/learning_curve.html` (regenerated at `6e1177f`, rendered light/dark at 1200 px and 390 px) | – |
 | E5 | – | no-go, deferred | Revisit with real traffic. |
+
+## Seam review (wave D)
+
+An independent read-only review of the merged code found bugs where workstreams meet. Each was reproduced, turned into a failing test, fixed in W12, and re-checked with the reviewer's scripts after merge.
+
+| Sev | Finding | Fix (W12) |
+|---|---|---|
+| H | A background rebuild that started before `treejit revoke` wrote its stale snapshot back, so a revoked edge replayed again | SQLite triggers bump an operator-state generation. A build whose generation changed before it wrote is discarded and rerun; an outcome mid-build leaves the family dirty. Trees from another `TREE_VERSION` are not served |
+| H | Repo-config taint did not cross W4's episode boundaries, so `git status` replayed after an earlier `git config core.fsmonitor …` | `Episode.prior_calls`; taint covers the whole conversation, T2/T3 included |
+| M | Sticky hints keyed by prefix only, so a hint first given in one conversation was inserted into another's already-forwarded history | every forward records "no hint" (NULL) at each position it sends; the first decision wins |
+| M | Age-based pruning of hints and compaction decisions changed a resumed conversation's history | never pruned by age; `prune --compact-days N` only on request |
+| M | argv shell tools ignored `env` and other args (a `GIT_EXTERNAL_DIFF` env was read-only, and a T3 fill could add it) | `env` treated as `K=V` prefixes; exec-capable vars are commit reasons; escalation flags never read-only; unknown args not read-only |
+| L | weak-id defer key unsalted; proxy with `rebuild="sync"` blocked the loop; `local_shell_call_output` not compacted | fixed |
