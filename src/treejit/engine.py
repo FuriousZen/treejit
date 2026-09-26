@@ -24,9 +24,9 @@ from . import compaction, dialects, families, subcalls
 from .builder import build_family
 from .config import Config
 from .dialects import Dialect
-from .model import Episode, NormRequest, ResponseInfo, ToolCall, weak_call_id
+from .model import Episode, NormRequest, ResponseInfo, ToolCall, calls_sig, weak_call_id
 from .replay import Plan, decide, hints, materialize
-from .store import Store, dumps
+from .store import TREE_VERSION, Store, dumps
 from .tree import TreeView
 from .util import h
 
@@ -38,6 +38,7 @@ SESSION_HEADERS = ("x-claude-code-session-id",)  # harness session ids sent as h
 TRUNCATED = ("max_tokens", "length", "pause_turn", "content_filter", "refusal")  # stops that don't end a task
 MAX_FORKS = 64
 MAX_DEFERRED = 4096
+MAX_STALE_BUILDS = 3                 # builds discarded in a row (operator changes) before giving up for now
 
 
 @dataclass
@@ -96,7 +97,7 @@ class TreeJIT:
     def set_rebuild_mode(self, mode: str) -> None:
         """"sync": outcome() rebuilds before it returns. "background": a worker thread rebuilds
         (coalescing outcomes per family) and swaps the live view in when done; requests keep the
-        previous view meanwhile. The proxy uses background unless `rebuild = "sync"`."""
+        previous view meanwhile. The proxy always uses background (its requests run on the event loop)."""
         if mode not in ("sync", "background"):
             raise ValueError(f"rebuild mode must be sync|background|auto, got {mode!r}")
         self.rebuild_mode = mode
@@ -128,8 +129,10 @@ class TreeJIT:
     @staticmethod
     def _load(store: Store, family: str) -> tuple[TreeView, float]:
         with store.transaction():  # one snapshot: the tables and built_at agree
-            row = store.q1("SELECT built_at FROM families WHERE id=?", (family,))
-            view = TreeView.load(store, family)
+            row = store.q1("SELECT built_at, tree_version FROM families WHERE id=?", (family,))
+            # a tree an older treejit built (another policy) is not served: empty until rebuilt
+            fresh = row is not None and row["tree_version"] == TREE_VERSION
+            view = TreeView.load(store, family) if fresh else TreeView(family)
         return view, ((row["built_at"] or 0.0) if row is not None else 0.0)
 
     def rebuild(self, family: str | None = None) -> list[dict]:
@@ -139,7 +142,12 @@ class TreeJIT:
 
     def _build(self, store: Store, family: str) -> dict:
         with self._build_lock, _no_gc():
-            out = build_family(store, self.cfg, family)
+            for _ in range(MAX_STALE_BUILDS):
+                out = build_family(store, self.cfg, family)
+                if not out.get("stale"):
+                    break
+                # operator state changed mid-build (build_family discarded it): build again on the new
+                # state. Still stale after that: the family stays dirty and the next request asks again.
             self._views[family] = self._load(store, family)
         return out
 
@@ -258,8 +266,7 @@ class TreeJIT:
             fwd = comp.body
         # hints are sticky: every hint given earlier in this conversation is re-inserted where it was
         # first given, so the forwarded history stays append-only (prompt cache, preserved thinking)
-        fwd, hint = compaction.sticky_hints(self.store, d, req, fwd, hints(view, self.cfg, plan.node),
-                                           self.cfg.compact_retention_days)
+        fwd, hint = compaction.sticky_hints(self.store, d, req, fwd, hints(view, self.cfg, plan.node))
         if plan.node:
             self.store.hit(plan.node)
         note = plan.reason + ("; " + "; ".join(plan.detail) if plan.detail else "") + ("; hints" if hint else "")
@@ -287,9 +294,10 @@ class TreeJIT:
                 result.run_id = run_id
             else:  # weak call ids: the run id needs the first observation; the next request settles these rows
                 ids = anchor[0] if anchor is not None else (ep.anchor_ids or [])
+                sig = calls_sig(info.calls) if anchor is not None else ep.anchor_calls
                 if len(self._deferred) >= MAX_DEFERRED:
                     self._deferred.pop(next(iter(self._deferred)))
-                self._deferred.setdefault(self._defer_key(ctx.family, ep, ids), []).append(
+                self._deferred.setdefault(self._defer_key(ctx.family, ep, ids, sig), []).append(
                     ([ctx.request_id] + ([ctx.sub_request_id] if ctx.sub_request_id else []), ep.index, ctx.task, ctx.task_hash))
         if run_id and ctx.sub_request_id:
             self.store.update_request(ctx.sub_request_id, run_id=run_id)
@@ -371,8 +379,10 @@ class TreeJIT:
         return h("conv", fam, ep.origin, ep.user, first)
 
     @staticmethod
-    def _defer_key(fam: str, ep: Episode, ids: list[str]) -> str:
-        return h("defer", fam, ep.origin, ep.user, ids)
+    def _defer_key(fam: str, ep: Episode, ids: list[str], sig: str) -> str:
+        # weak ids (`call_0`) are the same in every conversation: the first turn's calls (names and
+        # arguments) keep two concurrent conversations with the same first message apart
+        return h("defer", fam, ep.origin, ep.user, ids, sig)
 
     def _pick(self, base: str, ep: Episode) -> tuple[str, int]:
         inherited = 0
@@ -404,7 +414,7 @@ class TreeJIT:
         """Give deferred request rows of this conversation their run id (see complete())."""
         if not ep.anchor_ids:
             return
-        entries = self._deferred.pop(self._defer_key(fam, ep, ep.anchor_ids), None)
+        entries = self._deferred.pop(self._defer_key(fam, ep, ep.anchor_ids, ep.anchor_calls), None)
         for rids, index, task, th in entries or []:
             rid = run_id
             if (index, th) != (ep.index, task_hash):

@@ -10,8 +10,9 @@ Routes:
     POST /v1/responses                OpenAI Responses API (JSON or SSE; stateless requests are learned and
                                       replayed, `previous_response_id` / `conversation` pass through)
     POST /outcome                     {"run_id": "...|latest", "outcome": "pass|fail|error", "reason": "...", "wait": true}
-                                      rebuilds off the event loop; answers once the tree is rebuilt
-                                      ("wait": false: once the outcome is recorded)
+                                      rebuilds off the event loop (the proxy always rebuilds in the
+                                      background, `rebuild = "sync"` included); answers once the tree is
+                                      rebuilt ("wait": false: once the outcome is recorded)
     GET  /health, GET /stats
     anything else                     passed through untouched
 
@@ -41,10 +42,11 @@ class ProxyApp:
         self.jit = jit
         self.cfg = jit.cfg
         self._client = client
-        if self.cfg.rebuild == "auto":
-            # rebuilds run on the engine's worker thread: an outcome never stalls other requests,
-            # which keep the previous tree until the new one is swapped in
-            jit.set_rebuild_mode("background")
+        # Rebuilds always run on the engine's worker thread, whatever `rebuild` says: requests are handled
+        # on the event loop, and a sync build there (or waiting there for the build lock while /outcome
+        # builds on a thread) would stall every other request. Requests keep the previous tree until the
+        # new one is swapped in; /outcome (wait=true, the default) still answers once it is.
+        jit.set_rebuild_mode("background")
 
     @property
     def client(self) -> Any:

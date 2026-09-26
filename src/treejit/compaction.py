@@ -76,7 +76,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .config import Config
-from .dialects import Dialect, _text_of
+from .dialects import _OUTPUT_ITEMS, Dialect, _text_of
 from .features import guard_holds, obs_features, parse_json
 from .model import NormRequest, Observation, Step, ToolCall
 from .store import Store
@@ -307,11 +307,14 @@ def apply(store: Store, view: TreeView, cfg: Config, req: NormRequest, body: dic
 
 
 def maybe_prune(store: Store, cfg: Config, t: float) -> int:
-    """Drop compaction rows older than `compact_retention_days` (at most once per PRUNE_EVERY)."""
+    """Forget epoch-mode forward times older than `compact_retention_days` (at most once per
+    PRUNE_EVERY). Compaction decisions themselves are never pruned on the forward path: a conversation
+    can be resumed any time, and a decision rebuilt from a later tree could change a message it was
+    already sent (see Store.prune_compactions)."""
     if cfg.compact_retention_days <= 0 or t < getattr(store, "_compact_prune_at", 0.0):
         return 0
     store._compact_prune_at = t + PRUNE_EVERY  # type: ignore[attr-defined]
-    return store.prune_compactions(t - cfg.compact_retention_days * 86400)
+    return store.prune_conversations(t - cfg.compact_retention_days * 86400)
 
 
 def _output_text(item: dict) -> str:
@@ -324,8 +327,9 @@ def _results(req: NormRequest, body: dict) -> dict[str, tuple[str, bool]]:
     out: dict[str, tuple[str, bool]] = {}
     if req.dialect == "responses":
         for it in body.get("input") if isinstance(body.get("input"), list) else []:
-            if isinstance(it, dict) and it.get("type") in _OUTPUTS and isinstance(it.get("call_id"), str):
-                out.setdefault(it["call_id"], (_output_text(it), False))
+            cid = _output_call_id(it)
+            if cid is not None:
+                out.setdefault(cid, (_output_text(it), False))
         return out
     for m in body.get("messages") or []:
         if not isinstance(m, dict):
@@ -361,7 +365,16 @@ def _replace(content: Any, text: str) -> Any:
     return [block]
 
 
-_OUTPUTS = ("function_call_output", "custom_tool_call_output")
+_OUTPUTS = _OUTPUT_ITEMS  # function_call_output, custom_tool_call_output, local_shell_call_output
+
+
+def _output_call_id(it: Any) -> str | None:
+    """The call id a Responses output item answers (as dialects.Responses pairs them: `call_id`, else
+    `id`, which is how a `local_shell_call_output` names its call), or None if it isn't one."""
+    if not isinstance(it, dict) or it.get("type") not in _OUTPUTS:
+        return None
+    cid = it.get("call_id") or it.get("id")
+    return cid if isinstance(cid, str) and cid else None
 
 
 def _rewrite(dialect: str, body: dict, out: dict[str, str]) -> tuple[dict, set[str]]:
@@ -370,8 +383,8 @@ def _rewrite(dialect: str, body: dict, out: dict[str, str]) -> tuple[dict, set[s
         items = body.get("input") if isinstance(body.get("input"), list) else []
         new_items, done = list(items), set()
         for i, it in enumerate(items):
-            cid = it.get("call_id") if isinstance(it, dict) else None
-            if (isinstance(cid, str) and it.get("type") in _OUTPUTS and cid in out and cid not in done
+            cid = _output_call_id(it)
+            if (cid is not None and cid in out and cid not in done
                     and (isinstance(it.get("output"), str) or (isinstance(it.get("output"), list) and all(
                         isinstance(p, dict) and p.get("type") in ("input_text", "text") for p in it["output"])))):
                 o = it.get("output")
@@ -418,9 +431,14 @@ def _rewrite(dialect: str, body: dict, out: dict[str, str]) -> tuple[dict, set[s
 # conversation from the moment it is first forwarded: it is stored under an *anchor* (a chained hash of
 # the dialect, system prompt, tool names and every history item up to and including the one it follows,
 # cache_control markers ignored) and re-inserted, byte-identical, at the same position in every later
-# forward whose history has that prefix. A new hint is only ever given after the last item; if that
-# position already has one (a retried request, or another conversation with the very same prefix) the
-# stored one is reused. Hints unused for `compact_retention_days` are pruned.
+# forward whose history has that prefix. A new hint is only ever given after the last item, and only if
+# no forward has decided that position yet: every forward records "no hint" (a NULL row) at each position
+# of its history that has no decision, and the first decision at a position wins. So a hint first given in
+# conversation A is never inserted into conversation B that already forwarded that prefix without one
+# (identical prefixes are identical conversations up to there: the first user message, mostly). Decisions
+# are never pruned by age: a conversation can be resumed (`claude --resume`) any time later, and a missing
+# hint would change a message it has already sent. Storage is one small row per history position ever
+# forwarded, bounded by the trace log (which keeps every step's observation).
 
 
 def _no_cc(x: Any) -> Any:
@@ -443,26 +461,23 @@ def hint_anchors(req: NormRequest, items: list) -> list[str]:
     return out
 
 
-def sticky_hints(store: Store, d: Dialect, req: NormRequest, body: dict, hint: str | None,
-                 retention_days: float = 7.0) -> tuple[dict, str | None]:
-    """`body` with every hint this conversation was given re-inserted, plus `hint` (if any, and if this
-    position has none yet) after its last item. Returns (body, the hint after the last item or None)."""
+def sticky_hints(store: Store, d: Dialect, req: NormRequest, body: dict, hint: str | None) -> tuple[dict, str | None]:
+    """`body` with every hint this conversation was given re-inserted, plus `hint` (if any, and if no
+    forward has decided this position yet) after its last item. Returns (body, the hint after the last
+    item or None)."""
     items = d.history(req.raw)
     if not items:
         return body, None
-    t = now()
-    if retention_days > 0 and t >= getattr(store, "_hint_prune_at", 0.0):
-        store._hint_prune_at = t + PRUNE_EVERY  # type: ignore[attr-defined]
-        store.prune_hints(t - retention_days * 86400)
     anchors = hint_anchors(req, items)
     rows = store.hints(anchors)
     last = anchors[-1]
+    new = [(a, i, None) for i, a in enumerate(anchors) if a not in rows]
     if hint and last not in rows and d.inject_hint(body, hint) is not body:
-        store.save_hint(last, len(anchors) - 1, hint)
-        rows = store.hints(anchors)  # the first hint stored at a position wins
-    used = [i for i, a in enumerate(anchors) if a in rows]
+        new[-1] = (last, len(anchors) - 1, hint)
+    if new:
+        store.save_hints(new)
+        rows = store.hints(anchors)  # the first decision at a position wins (another forward may have won)
+    used = [i for i, a in enumerate(anchors) if rows.get(a)]
     for i in reversed(used):  # from the end: an inserted item never shifts a later insertion point
         body = d.inject_hint(body, rows[anchors[i]], at=i)
-    if used:
-        store.touch_hints([anchors[i] for i in used], t)
     return body, rows.get(last)

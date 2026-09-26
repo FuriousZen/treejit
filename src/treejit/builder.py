@@ -27,7 +27,7 @@ from .config import Config
 from .features import excess_negatives, guard_holds, guard_of, learn_decision_list, obs_features, postcondition, task_words
 from .model import Observation, Step, ToolCall, user_ended
 from .policy import commit_reason, is_readonly
-from .store import Store, dumps
+from .store import TREE_VERSION, Store, dumps
 from .templates import TemplateFold, anti_unify, call_slots, edge_id, label, shape_of, var_slots
 from .tree import END, contexts, node_id
 from .util import canon, decay, now
@@ -216,8 +216,26 @@ def _usage_by_call(store: Store, family: str) -> dict[str, tuple[float, float]]:
     return out
 
 
+# Test hook: called as _before_commit(store, family) once a build is computed, just before it is
+# written (tests use it to interleave an operator change or an outcome with a build deterministically).
+_before_commit: Callable[[Store, str], None] | None = None
+
+
 def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
+    """Build and write one family's tree. The result has `stale: True` (and nothing was written) when
+    operator state changed while it was computed: the caller builds again.
+
+    A build reads outcomes and operator state at its start and writes much later (seconds, on a big
+    log). Two generations make the write safe against changes in between (another thread, the CLI in
+    another process): the operator generation (meta.op_gen, bumped by any write to approvals,
+    not_commit, pins, evictions) must be unchanged or the build is discarded, since committing it would
+    resurrect a revoked approval or undo a pin; the family's generation (bumped by every `dirty=1`, e.g.
+    an outcome) decides whether the family is clean afterwards, so an outcome recorded mid-build leaves
+    it dirty for the next build instead of being lost."""
     t_now = now()
+    row = store.q1("SELECT gen FROM families WHERE id=?", (family,))
+    gen0 = int(row["gen"] or 0) if row is not None else 0
+    op0 = store.op_gen()  # read before any operator table (the triggers bump it in the same transaction)
     runs = load_runs(store, family, cfg.max_runs)
     pins = store.pins()
     approvals = store.approvals()
@@ -480,17 +498,28 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
     edge_rows = [(eid_of[s], family, templates[s]["tool"], s, dumps(templates[s]), len(by_shape[s]), label(templates[s]))
                  for s in by_shape]
 
-    with store.transaction():
+    if _before_commit is not None:
+        _before_commit(store, family)
+    stale = False
+    with store.transaction(immediate=True):  # the checks and the write see the same state
         db = store.db
-        for table in ("edges", "nodes", "node_edges"):
-            db.execute(f"DELETE FROM {table} WHERE family=?", (family,))
-        db.executemany("INSERT INTO edges VALUES(?,?,?,?,?,?,?)", edge_rows)
-        db.executemany("INSERT INTO nodes(id, family, kind, ctx, depth, parent, via, n_runs, n_pass, stump, last_seen, n_end) "
-                       "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", node_rows)
-        db.executemany(f"INSERT INTO node_edges({','.join(NE_COLS)}) VALUES({','.join('?' * len(NE_COLS))})", ne_rows)
-        db.execute("UPDATE families SET built_at=?, dirty=0 WHERE id=?", (t_now, family))
+        if store.op_gen() != op0:
+            stale = True
+        else:
+            for table in ("edges", "nodes", "node_edges"):
+                db.execute(f"DELETE FROM {table} WHERE family=?", (family,))
+            db.executemany("INSERT INTO edges(id, family, tool, shape, template, n, label) VALUES(?,?,?,?,?,?,?)", edge_rows)
+            db.executemany("INSERT INTO nodes(id, family, kind, ctx, depth, parent, via, n_runs, n_pass, stump, last_seen, n_end) "
+                           "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", node_rows)
+            db.executemany(f"INSERT INTO node_edges({','.join(NE_COLS)}) VALUES({','.join('?' * len(NE_COLS))})", ne_rows)
+            # clean only if nothing asked for a build since this one started (an outcome recorded
+            # mid-build keeps the family dirty: its run is not in this tree)
+            db.execute("UPDATE families SET built_at=?, tree_version=?, dirty=CASE WHEN gen=? THEN 0 ELSE 1 END WHERE id=?",
+                       (t_now, TREE_VERSION, gen0, family))
     out = {"family": family, "runs": len(runs), "edges": len(edge_rows), "nodes": len(node_rows),
            "hot": sum(1 for r in ne_rows if r[11] == "hot"), "tomb": sum(1 for r in ne_rows if r[11] == "tomb")}
+    if stale:
+        out["stale"] = True
     for big in (inst, step_nodes, by_shape, keys_of):
         big.clear()
     _release(runs)

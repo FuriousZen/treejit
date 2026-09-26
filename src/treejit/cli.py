@@ -145,8 +145,9 @@ def cmd_prune(a: argparse.Namespace) -> None:
         for fam in {r["family"] for r in victims}:
             jit.rebuild(fam)
     print(f"{'would evict' if a.dry_run else 'evicted'} {len(victims)} node(s) (idle > {days}d, hits < {min_hits})")
-    # compaction decisions (PLAN C3): rows of runs idle longer than the retention, and orphans
-    cdays = a.compact_days if a.compact_days is not None else jit.cfg.compact_retention_days
+    # compaction decisions (PLAN C3): only when asked (--compact-days). A conversation resumed after its
+    # decisions are gone may be sent a different history (see Store.prune_compactions)
+    cdays = a.compact_days or 0
     if cdays > 0:
         n = jit.store.prune_compactions(now() - cdays * 86400, dry_run=a.dry_run)
         print(f"{'would remove' if a.dry_run else 'removed'} {n} compaction decision(s) (runs idle > {cdays}d)")
@@ -271,7 +272,8 @@ def main(argv: list[str] | None = None) -> None:
     s = add("prune", help="evict cold nodes and old compaction decisions")
     s.add_argument("--days", type=float)
     s.add_argument("--min-hits", type=int)
-    s.add_argument("--compact-days", type=float, help="compaction retention (default: compact_retention_days; 0 = keep)")
+    s.add_argument("--compact-days", type=float, help="also drop compaction decisions of runs idle this long (default: keep; a conversation resumed "
+                        "later may then be sent a different history)")
     s.add_argument("--dry-run", action="store_true")
     s.set_defaults(fn=cmd_prune)
 
