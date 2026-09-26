@@ -17,6 +17,9 @@ CREATE TABLE IF NOT EXISTS families(
   id TEXT PRIMARY KEY, tools_hash TEXT, prefix TEXT, dialect TEXT,
   created REAL, updated REAL, built_at REAL DEFAULT 0, dirty INTEGER DEFAULT 1);
 CREATE INDEX IF NOT EXISTS families_tools ON families(tools_hash);
+CREATE TABLE IF NOT EXISTS family_lines(
+  family TEXT, line TEXT, n INTEGER, chars INTEGER, text TEXT, pos INTEGER, PRIMARY KEY(family, line));
+CREATE TABLE IF NOT EXISTS family_members(sys TEXT PRIMARY KEY, family TEXT, ts REAL);
 
 CREATE TABLE IF NOT EXISTS runs(
   id TEXT PRIMARY KEY, family TEXT, task TEXT, task_hash TEXT, created REAL, updated REAL,
@@ -94,6 +97,13 @@ class Store:
         if "n_end" not in cols:
             self.db.execute("ALTER TABLE nodes ADD COLUMN n_end INTEGER DEFAULT 0")
             self.db.execute("UPDATE families SET dirty=1")
+        # line-set family keying: member count (0 = written by the prefix-based keying,
+        # seeded from `prefix` on first use) and the old prefix kept as a fallback rule
+        cols = {r["name"] for r in self.db.execute("PRAGMA table_info(families)").fetchall()}
+        if "n_members" not in cols:
+            self.db.execute("ALTER TABLE families ADD COLUMN n_members INTEGER DEFAULT 0")
+        if "legacy_prefix" not in cols:
+            self.db.execute("ALTER TABLE families ADD COLUMN legacy_prefix TEXT")
 
     def close(self) -> None:
         self.db.close()
