@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import dialects, families
+from . import compaction, dialects, families
 from .builder import build_family
 from .config import Config
 from .model import Episode, ResponseInfo
@@ -113,13 +113,19 @@ class TreeJIT:
             return Result("replay", resp, req.stream, sse, run_id, plan.tier, plan, self._headers(run_id, plan.tier))
 
         fwd = d.prepare_forward(req)
+        comp = compaction.apply(self.store, view, self.cfg, req, fwd) if self.cfg.compact else None
+        if comp is not None:
+            fwd = comp.body
         hint = hints(view, self.cfg, plan.node)
         if hint:
             fwd = d.inject_hint(fwd, hint)
         if plan.node:
             self.store.hit(plan.node)
         note = plan.reason + ("; " + "; ".join(plan.detail) if plan.detail else "") + ("; hints" if hint else "")
-        rid = self.store.log_request(family=fam, run_id=run_id, dialect=dialect, tier="T4", node=plan.node, note=note[:500])
+        if comp is not None and comp.n:
+            note += "; " + comp.note
+        rid = self.store.log_request(family=fam, run_id=run_id, dialect=dialect, tier="T4", node=plan.node, note=note[:500],
+                                     compacted_chars=comp.chars if comp is not None else 0)
         return Result("forward", fwd, req.stream, None, run_id, "T4", plan, self._headers(run_id, "T4"),
                       _Pending(rid, fam, ep.task, task_hash, run_id, t0))
 

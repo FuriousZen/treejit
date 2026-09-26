@@ -31,6 +31,7 @@ def window_stats(rows: list[dict], a: int, b: int) -> dict:
         "success_pct": 100 * sum(1 for r in w if r["success"]) / len(w),
         "wall_s_per_task": sum(r["wall_ms"] for r in w) / len(w) / 1000,
         "side_exits": sum(r["side_exits"] for r in w),
+        "compacted_chars_per_task": sum(r["compacted_chars"] for r in w) / len(w),
     }
 
 
@@ -40,7 +41,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--family", choices=["mixed", "coding", "retail"], default="mixed")
     p.add_argument("--noise", type=float, default=0.06, help="probability the simulated model takes a known-bad shortcut")
-    p.add_argument("--modes", default="baseline,treejit,treejit+ok")
+    p.add_argument("--modes", default="baseline,treejit,treejit+ok",
+                   help="comma-separated: baseline, treejit, treejit+ok; append +compact for prefix compaction")
     p.add_argument("--via-proxy", action="store_true", help="run treejit modes through the ASGI proxy (SSE streaming)")
     p.add_argument("--window", type=int, default=10)
     p.add_argument("--out", default="bench_out")
@@ -58,7 +60,7 @@ def main(argv: list[str] | None = None) -> None:
                             db=None if mode == "baseline" else os.path.join(a.out, f"{mode}.db"))
             key = mode
         series[key] = to_rows(res)
-        print(f"{key:<18} {a.tasks} tasks in {time.time() - t0:.1f}s")
+        print(f"{key:<26} {a.tasks} tasks in {time.time() - t0:.1f}s")
 
     n = a.tasks
     summary = {m: {"first": window_stats(rows, 0, min(10, n)),
@@ -75,12 +77,13 @@ def main(argv: list[str] | None = None) -> None:
     with open(os.path.join(a.out, "learning_curve.html"), "w") as f:
         f.write(report_html(series, summary, meta, a.window))
 
-    print(f"\n{'mode':<18} {'window':<9} {'calls/task':>10} {'tokens/task':>12} {'replayed':>9} {'success':>8} {'side exits':>10}")
+    print(f"\n{'mode':<26} {'window':<9} {'calls/task':>10} {'tokens/task':>12} {'replayed':>9} {'success':>8} {'side exits':>10} "
+          f"{'compacted/task':>15}")
     for m, s in summary.items():
         for k in ("first", "mid", "last"):
             x = s[k]
-            print(f"{m:<18} {x['range']:<9} {x['calls_per_task']:>10.2f} {x['tokens_per_task']:>12,.0f} {x['served_pct']:>8.0f}% "
-                  f"{x['success_pct']:>7.0f}% {x['side_exits']:>10}")
+            print(f"{m:<26} {x['range']:<9} {x['calls_per_task']:>10.2f} {x['tokens_per_task']:>12,.0f} {x['served_pct']:>8.0f}% "
+                  f"{x['success_pct']:>7.0f}% {x['side_exits']:>10} {x['compacted_chars_per_task']:>15,.0f}")
     print(f"\nwrote {a.out}/results.csv, summary.json, learning_curve.html")
 
 

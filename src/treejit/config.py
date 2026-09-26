@@ -55,6 +55,10 @@ class Config:
     # frontier hints
     hints: str = "failures"        # off | failures | always
     hint_max: int = 5
+    # frontier prefix compaction (opt-in): digest verified replayed observations in forwarded requests
+    compact: bool = False
+    compact_keep_last: int = 3     # the last N observations always go upstream in full
+    compact_min_chars: int = 400   # smaller observations are left alone
     # tool policy
     replay_tools: list = field(default_factory=lambda: list(DEFAULT_REPLAY_TOOLS))
     shell_tools: list = field(default_factory=lambda: list(DEFAULT_SHELL_TOOLS))

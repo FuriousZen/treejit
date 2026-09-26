@@ -6,6 +6,7 @@ Modes
                 everything else goes to the model (allowlist only)
   treejit+ok    same, with the operator having approved all edges (`treejit approve '*'`),
                 so proven write steps and commit points can replay too
+  +compact      suffix (e.g. treejit+ok+compact): frontier prefix compaction on (Config.compact)
   proxy modes   `--via-proxy` runs the treejit modes through the real ASGI proxy with
                 streamed (SSE) responses instead of inline mode
 """
@@ -41,6 +42,7 @@ class TaskResult:
     tool_calls: int = 0
     replayed_calls: int = 0
     side_exits: int = 0       # replayed steps whose result broke the learned postcondition
+    compacted_chars: int = 0  # observation chars treejit elided from forwarded requests
     input_tokens: int = 0
     output_tokens: int = 0
     model_ms: float = 0.0
@@ -101,6 +103,7 @@ def run_suite(n_tasks: int, seed: int = 0, family: str = "mixed", mode: str = "t
         r.success, r.reason = env.verify()
         if jit is not None:
             r.side_exits = _side_exits(jit, f"task-{seed}-{i}")
+            r.compacted_chars = _compacted(jit, f"task-{seed}-{i}")
             jit.outcome(f"task-{seed}-{i}", r.success, None if r.success else r.reason)
         results.append(r)
     if jit is not None:
@@ -114,14 +117,22 @@ def _fresh_jit(db: str | None, mode: str, **overrides: Any) -> TreeJIT:
         for suffix in ("", "-wal", "-shm"):
             if os.path.exists(path + suffix):
                 os.remove(path + suffix)
+    flags = set(mode.split("+")[1:])
+    if "compact" in flags:
+        overrides.setdefault("compact", True)
     jit = TreeJIT(path, **overrides)
-    if mode.endswith("+ok"):
+    if "ok" in flags:
         jit.store.x("INSERT OR REPLACE INTO approvals(edge, node, ts) VALUES('*', '', ?)", (now(),))
     return jit
 
 
 def _side_exits(jit: TreeJIT, run_id: str) -> int:
     row = jit.store.q1("SELECT COUNT(*) n FROM requests WHERE run_id=? AND note LIKE 'side_exit%'", (run_id,))
+    return int(row["n"]) if row else 0
+
+
+def _compacted(jit: TreeJIT, run_id: str) -> int:
+    row = jit.store.q1("SELECT COALESCE(SUM(compacted_chars), 0) n FROM requests WHERE run_id=?", (run_id,))
     return int(row["n"]) if row else 0
 
 
@@ -267,6 +278,7 @@ async def _run_proxy_async(n_tasks: int, seed: int, family: str, mode: str, nois
                 msgs.append({"role": "user", "content": blocks})
             r.success, r.reason = env.verify()
             r.side_exits = _side_exits(jit, run_id)
+            r.compacted_chars = _compacted(jit, run_id)
             out = await client.post("/outcome", json={"run_id": run_id, "outcome": "pass" if r.success else "fail",
                                                       "reason": None if r.success else r.reason})
             out.raise_for_status()

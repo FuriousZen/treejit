@@ -10,6 +10,7 @@ MODE_LABELS = {
     "baseline": "Plain agent",
     "treejit": "treejit (read-only allowlist)",
     "treejit+ok": "treejit (edges approved)",
+    "treejit+ok+compact": "treejit (edges approved, compaction)",
 }
 
 
@@ -60,12 +61,12 @@ TEMPLATE = r"""<!doctype html>
 <style>
 :root { color-scheme: light; --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
   --grid:#e1e0d9; --axis:#c3c2b7; --ring:rgba(11,11,11,0.10);
-  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; }
+  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#8a5cf5; }
 @media (prefers-color-scheme: dark) { :root:where(:not([data-theme="light"])) { color-scheme: dark; --page:#0d0d0d; --surface:#1a1a19;
   --ink:#ffffff; --ink2:#c3c2b7; --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,0.10);
-  --s1:#3987e5; --s2:#d95926; --s3:#199e70; } }
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#9d74f7; } }
 :root[data-theme="dark"] { color-scheme: dark; --page:#0d0d0d; --surface:#1a1a19; --ink:#ffffff; --ink2:#c3c2b7;
-  --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,0.10); --s1:#3987e5; --s2:#d95926; --s3:#199e70; }
+  --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,0.10); --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#9d74f7; }
 * { box-sizing: border-box; }
 body { margin:0; background:var(--page); color:var(--ink); font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; }
 main { max-width:1080px; margin:0 auto; padding:24px 16px 48px; }
@@ -108,7 +109,7 @@ __ROWS__</table></div></details>
 </main>
 <script>
 const D = __DATA__;
-const COLORS = ["var(--s1)", "var(--s2)", "var(--s3)"];
+const COLORS = ["var(--s1)", "var(--s2)", "var(--s3)", "var(--s4)"];
 function roll(xs, w) { const out = []; let s = 0; for (let i = 0; i < xs.length; i++) { s += xs[i]; if (i >= w) s -= xs[i - w]; out.push(s / Math.min(i + 1, w)); } return out; }
 function rollRatio(pairs, w) { const out = []; for (let i = 0; i < pairs.length; i++) { let a = 0, b = 0; for (let j = Math.max(0, i - w + 1); j <= i; j++) { a += pairs[j][0]; b += pairs[j][1]; } out.push(b ? 100 * a / b : 0); } return out; }
 const METRICS = [

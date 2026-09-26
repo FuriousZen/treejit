@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS requests(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, family TEXT, run_id TEXT, dialect TEXT, tier TEXT,
   node TEXT, n_calls INTEGER DEFAULT 0, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
   cache_read INTEGER DEFAULT 0, cache_write INTEGER DEFAULT 0, latency_ms REAL, status INTEGER, note TEXT,
-  call_ids TEXT);
+  call_ids TEXT, compacted_chars INTEGER DEFAULT 0);
 CREATE INDEX IF NOT EXISTS requests_run ON requests(run_id);
 CREATE INDEX IF NOT EXISTS requests_family ON requests(family);
 
@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS pins(node TEXT, edge TEXT, ts REAL, PRIMARY KEY(node,
 CREATE TABLE IF NOT EXISTS approvals(edge TEXT, node TEXT, ts REAL, PRIMARY KEY(edge, node));
 CREATE TABLE IF NOT EXISTS evictions(node TEXT PRIMARY KEY, ts REAL);
 CREATE TABLE IF NOT EXISTS hits(node TEXT PRIMARY KEY, hits INTEGER, last_hit REAL);
+CREATE TABLE IF NOT EXISTS compactions(call_id TEXT PRIMARY KEY, obs_hash TEXT, digest TEXT, saved INTEGER, ts REAL);
 """
 
 OBS_CAP = 64 * 1024
@@ -70,6 +71,13 @@ class Store:
             self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Columns added after a DB may have been created (CREATE TABLE IF NOT EXISTS won't add them)."""
+        cols = {r["name"] for r in self.db.execute("PRAGMA table_info(requests)").fetchall()}
+        if "compacted_chars" not in cols:
+            self.db.execute("ALTER TABLE requests ADD COLUMN compacted_chars INTEGER DEFAULT 0")
 
     def close(self) -> None:
         self.db.close()
@@ -151,6 +159,22 @@ class Store:
             return
         sets = ",".join(f"{k}=?" for k in kw)
         self.x(f"UPDATE requests SET {sets} WHERE id=?", [*kw.values(), rid])
+
+    # -------------------------------------------------------------- compaction (sticky per call id)
+    def compactions(self, call_ids: list[str]) -> dict[str, tuple[str, str]]:
+        """{call_id: (obs_hash, digest)} for call ids compacted by an earlier request."""
+        out: dict[str, tuple[str, str]] = {}
+        for i in range(0, len(call_ids), 500):
+            chunk = call_ids[i : i + 500]
+            for r in self.q(f"SELECT call_id, obs_hash, digest FROM compactions WHERE call_id IN ({','.join('?' * len(chunk))})", chunk):
+                out[r["call_id"]] = (r["obs_hash"], r["digest"])
+        return out
+
+    def save_compactions(self, rows: list[tuple]) -> None:
+        """rows: (call_id, obs_hash, digest, saved_chars)"""
+        t = now()
+        self.xmany("INSERT OR IGNORE INTO compactions(call_id, obs_hash, digest, saved, ts) VALUES(?,?,?,?,?)",
+                   [(*r, t) for r in rows])
 
     # -------------------------------------------------------------- operator state
     def pins(self) -> set[tuple[str, str]]:
