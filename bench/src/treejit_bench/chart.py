@@ -39,7 +39,7 @@ def report_html(series: dict[str, list[dict]], summary: dict[str, Any], meta: di
         tok_cut = 1 - last["tokens_per_task"] / base["tokens_per_task"] if base.get("tokens_per_task") else 0
         tiles.append(f"""<div class="tile"><div class="tile-k">{html.escape(_label(m))} · last {last['n']} tasks</div>
 <div class="tile-row"><div><div class="big">{last['served_pct']:.0f}%</div><div class="sub">tool calls served by replay</div></div>
-<div><div class="big">−{calls_cut * 100:.0f}%</div><div class="sub">model calls / task ({last['calls_per_task']:.2f} vs {base.get('calls_per_task', 0):.2f})</div></div>
+<div><div class="big">−{calls_cut * 100:.0f}%</div><div class="sub">model calls / task ({last['calls_per_task']:.2f} vs {base.get('calls_per_task', 0):.2f}; + {last.get('small_calls_per_task', 0):.2f} small)</div></div>
 <div><div class="big">−{tok_cut * 100:.0f}%</div><div class="sub">tokens / task</div></div>
 <div><div class="big">{last['success_pct']:.0f}%</div><div class="sub">success (plain agent {base.get('success_pct', 0):.0f}%)</div></div></div></div>""")
     rows = []
@@ -47,7 +47,7 @@ def report_html(series: dict[str, list[dict]], summary: dict[str, Any], meta: di
         for wname in ("first", "mid", "last"):
             w = s[wname]
             rows.append(f"<tr><td>{html.escape(_label(m))}</td><td>{html.escape(w['range'])}</td>"
-                        f"<td>{w['calls_per_task']:.2f}</td><td>{w['tokens_per_task']:,.0f}</td><td>{w['served_pct']:.0f}%</td>"
+                        f"<td>{w['calls_per_task']:.2f}</td><td>{w.get('small_calls_per_task', 0):.2f}</td><td>{w['tokens_per_task']:,.0f}</td><td>{w['served_pct']:.0f}%</td>"
                         f"<td>{w['success_pct']:.0f}%</td><td>{w['wall_s_per_task']:.1f}</td><td>{w['side_exits']}</td></tr>")
     meta_line = " · ".join(f"{k}={v}" for k, v in meta.items())
     return TEMPLATE.replace("__DATA__", json.dumps(data)).replace("__TILES__", "".join(tiles)) \
@@ -102,7 +102,7 @@ Curves are rolling means over the previous tasks; the tree starts empty.</p>
 <div class="legend" id="legend"></div>
 <div class="charts" id="charts"></div>
 <details><summary>Table view</summary><div class="tablewrap"><table>
-<tr><th>mode</th><th>tasks</th><th>model calls / task</th><th>tokens / task</th><th>served by replay</th><th>success</th><th>sim. wall-clock s / task</th><th>side exits</th></tr>
+<tr><th>mode</th><th>tasks</th><th>model calls / task</th><th>small calls / task</th><th>tokens / task</th><th>served by replay</th><th>success</th><th>sim. wall-clock s / task</th><th>side exits</th></tr>
 __ROWS__</table></div></details>
 <p class="meta">__META__</p>
 </main>
@@ -114,7 +114,7 @@ function rollRatio(pairs, w) { const out = []; for (let i = 0; i < pairs.length;
 const METRICS = [
   { key: "calls", title: "Model calls per task", sub: "lower is better", f: m => roll(m.calls, D.window), fmt: v => v.toFixed(2) },
   { key: "tokens", title: "Tokens per task", sub: "prompt + completion sent to the model", f: m => roll(m.tokens, D.window), fmt: v => Math.round(v).toLocaleString() },
-  { key: "served", title: "Tool calls served by replay", sub: "% of the task's tool calls, no model call", f: m => rollRatio(m.served, D.window), fmt: v => v.toFixed(0) + "%" },
+  { key: "served", title: "Tool calls served by replay", sub: "% of the task's tool calls, no full model call", f: m => rollRatio(m.served, D.window), fmt: v => v.toFixed(0) + "%" },
 ];
 const legend = document.getElementById("legend");
 D.modes.forEach((m, i) => { const s = document.createElement("span"); s.style.setProperty("--c", COLORS[i]); s.textContent = m.label; legend.appendChild(s); });

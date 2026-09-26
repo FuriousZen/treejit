@@ -70,9 +70,9 @@ class Dialect:
     name = ""
     call_prefix = ""
 
-    def new_call_id(self, node: str, conf: float = 1.0) -> str:
+    def new_call_id(self, node: str, conf: float = 1.0, via: str = "") -> str:
         c = max(0, min(255, round(conf * 255)))
-        return f"{self.call_prefix}_{REPLAY_MARK}_{node[:12]}_{c:02x}{rand_id(10)}"
+        return f"{self.call_prefix}_{REPLAY_MARK}_{node[:12]}_{c:02x}{rand_id(10)}" + (f"_{via}" if via else "")
 
     # implemented by subclasses
     def parse_request(self, body: dict) -> NormRequest: ...

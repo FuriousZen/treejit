@@ -73,6 +73,7 @@ class NodeEdge:
     savings: float
     latency_ms: float
     score: float
+    fillable: bool = False  # replayable once its holes are filled (T3)
 
     @classmethod
     def from_row(cls, r: Any) -> "NodeEdge":
@@ -82,6 +83,7 @@ class NodeEdge:
             json.loads(r["bindings"] or "{}"), json.loads(r["holes"] or "[]"), json.loads(r["guard"] or "{}"),
             json.loads(r["post"] or "{}"), json.loads(r["ref"] or "{}"), json.loads(r["reasons"] or "[]"),
             bool(r["commit_point"]), r["savings"] or 0.0, r["latency_ms"] or 0.0, r["score"] or 0.0,
+            bool(r["fillable"]),
         )
 
 

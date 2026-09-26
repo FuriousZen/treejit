@@ -44,6 +44,11 @@ class Config:
     hard_cap: int = 8              # K: max consecutive replayed steps
     batch: bool = True             # collapse independent proven edges into one assistant message
     max_batch: int = 4
+    # escalation tiers between replay and a full model call
+    t2: bool = True                # choose among known children / checkpoint when the budget runs out
+    t3: bool = True                # fill holes of a known edge with one small constrained call
+    small_model: str = ""          # model for T2/T3 subcalls (default: the request's model)
+    subcall_max_tokens: int = 512
     # failure handling
     tomb_k: float = 2.0            # decayed failures across distinct inputs before tombstoning
     tomb_prob: float = 0.5

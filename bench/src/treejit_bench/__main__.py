@@ -26,6 +26,7 @@ def window_stats(rows: list[dict], a: int, b: int) -> dict:
     return {
         "range": f"{a + 1}-{a + len(w)}", "n": len(w),
         "calls_per_task": sum(r["model_calls"] for r in w) / len(w),
+        "small_calls_per_task": sum(r["small_calls"] for r in w) / len(w),
         "tokens_per_task": sum(r["tokens"] for r in w) / len(w),
         "served_pct": 100 * sum(r["replayed_calls"] for r in w) / tool,
         "success_pct": 100 * sum(1 for r in w if r["success"]) / len(w),
@@ -75,11 +76,13 @@ def main(argv: list[str] | None = None) -> None:
     with open(os.path.join(a.out, "learning_curve.html"), "w") as f:
         f.write(report_html(series, summary, meta, a.window))
 
-    print(f"\n{'mode':<18} {'window':<9} {'calls/task':>10} {'tokens/task':>12} {'replayed':>9} {'success':>8} {'side exits':>10}")
+    print(f"\n{'mode':<18} {'window':<9} {'calls/task':>10} {'small/task':>10} {'tokens/task':>12} {'replayed':>9} {'success':>8} "
+          f"{'side exits':>10}")
     for m, s in summary.items():
         for k in ("first", "mid", "last"):
             x = s[k]
-            print(f"{m:<18} {x['range']:<9} {x['calls_per_task']:>10.2f} {x['tokens_per_task']:>12,.0f} {x['served_pct']:>8.0f}% "
+            print(f"{m:<18} {x['range']:<9} {x['calls_per_task']:>10.2f} {x['small_calls_per_task']:>10.2f} "
+                  f"{x['tokens_per_task']:>12,.0f} {x['served_pct']:>8.0f}% "
                   f"{x['success_pct']:>7.0f}% {x['side_exits']:>10}")
     print(f"\nwrote {a.out}/results.csv, summary.json, learning_curve.html")
 

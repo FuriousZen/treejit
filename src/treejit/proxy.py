@@ -106,10 +106,26 @@ class ProxyApp:
             await self._passthrough(scope, headers, body, send)
             return
         res = self.jit.handle(dialect, req, headers)
+        if res.kind == "subcall":
+            res = await self._subcall(dialect, scope, headers, res)
         if res.kind == "replay":
             await self._send_replay(res, send)
             return
         await self._forward(dialect, scope, headers, res, send)
+
+    async def _subcall(self, dialect: str, scope: dict, headers: dict, res: Result) -> Result:
+        """T2/T3: one small non-streaming call upstream with the client's auth; any failure -> T4."""
+        url = self._upstream(dialect, headers) + _path_qs(scope)
+        fwd_headers = {k: v for k, v in headers.items() if k not in HOP and not k.startswith("x-treejit")}
+        fwd_headers["accept-encoding"] = "identity"
+        t0 = time.perf_counter()
+        try:
+            r = await self.client.post(url, headers=fwd_headers, content=json.dumps(res.body).encode())
+            status = r.status_code
+            out = r.json() if status < 400 else None
+        except Exception:  # network error, bad JSON: the subcall is best-effort
+            status, out = 599, None
+        return self.jit.resume(res, out if isinstance(out, dict) else None, status, (time.perf_counter() - t0) * 1000)
 
     async def _send_replay(self, res: Result, send: Any) -> None:
         extra = [(k.encode(), v.encode()) for k, v in res.headers.items()]
