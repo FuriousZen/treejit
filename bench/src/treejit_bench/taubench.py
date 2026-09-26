@@ -319,7 +319,7 @@ class _Messages:
 
 class ClaudeAgent:
     """A real Anthropic model. SDK-shaped (`.messages.create`) so `jit.wrap(agent)` treats it like an
-    `anthropic.Anthropic()` client; it counts full vs small (treejit_* forced-tool) calls for the runner.
+    `anthropic.Anthropic()` client; it counts full vs small (treejit T2/T3 subcall) calls for the runner.
     Prompt caching: a breakpoint on the system prompt plus top-level automatic caching."""
 
     def __init__(self, client: Any = None, model: str = "claude-opus-5", max_tokens: int = 4096, cache: bool = True) -> None:

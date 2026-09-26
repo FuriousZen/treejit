@@ -10,122 +10,41 @@ harness ──► treejit ──► model API
                └─ frontier step: forwarded, recorded, learned from
 ```
 
-## Status
-
-This is the MVP from the handoff, plus value branching and composite argument templates (pulled forward because the benchmark needed them) and the T2/T3 escalation tiers.
-
-| Area | State |
-|---|---|
-| Anthropic Messages + OpenAI Chat Completions dialects, JSON and SSE (replay and pass-through) | done |
-| OpenAI Responses API (`POST /v1/responses`, inline `client.responses.create`, JSON and SSE; Codex argv shell args) | done for stateless requests (`store: false`, full `input`); `previous_response_id` / `conversation` pass through unlearned |
-| Current Claude models (Fable 5.1, Mythos 5.1, Opus 5.5): no forced `tool_choice`, sticky append-only hints, model-aware thinking drop | done; checked offline only, see [Compatibility](#compatibility-with-current-claude-models) |
-| Trace recorder, system-prompt family keying (masked line sets), span-preserving shell tokenizer | done |
-| Tree builder: anti-unification, provenance bindings, last-k-edge macros, root depth cap D | done |
-| Failed replays as negative evidence, earned task-word rules, END (the model stops here) as a choice | done |
-| T0 replay / T1 guarded branch, postcondition side exits, confidence budget, hard cap K, batching | done |
-| Read-only allowlist, commit points + operator approval, soft tombstones, node-local T4 hints | done |
-| CLI: `serve show runs explain outcome pending pin approve revoke prune export build stats`; HTML / Mermaid / SKILL.md export | done |
-| Run identity (header, harness session id, derived; forks instead of extending finished runs) and multi-turn episodes (user steps) | done |
-| Benchmark harness (synthetic suite, inline and real-proxy modes) + learning-curve report | done |
-| T2 choose / budget checkpoint, T3 hole filling (one small structured subcall, proxy and inline) | done |
-| Frontier prefix compaction (verified replayed observations digested in forwarded requests) | done, **opt-in** (`compact = true`) |
-| Inline-mode streaming replay (`stream=True` and Anthropic `messages.stream()`: replay, record, END) | done (sync clients) |
-| Macros-as-tools | not yet (deferred, PLAN E5) |
-| tau-bench runner (`--suite taubench`: oracle-with-noise agent, `ClaudeAgent` for a real model, tau-bench's own reward) | done; oracle runs below, real-model runs not yet (no API key here) |
-| Bench cost model: virtual harness payload (`--payload`), prompt-cache model (`--cache`), `cost_tokens` | done |
-
 The core (`src/treejit`, except `proxy.py`) uses only the standard library. Proxy mode also needs `httpx` and `uvicorn`.
 
-## Results (synthetic suite, 200 tasks, `python -m treejit_bench --tasks 200 --modes baseline,treejit,treejit+ok,treejit+ok+compact`)
+**Nothing here has run against a real model yet** (there is no API key in the development environment). Every result below comes from a simulated agent or from an oracle agent on tau-bench, and the compatibility work for current Claude models is checked against documentation and fakes only. See [Compatibility](#compatibility-with-current-claude-models) and [Known limits](#known-limits).
 
-A simulated agent works a mixed stream of coding tasks (typo fix / version bump / delete module, each with a flaky-test branch) and tau-bench-style retail tasks (branching on order status). The tree starts empty. The simulated model sees only the conversation. It is stochastic (argument formatting varies, free-form commit messages), and it takes a known-bad shortcut 6% of the time. Observations are realistically sized: `Read` returns a 45–65-line file, `pytest -q` prints 150–420 tests as progress rows plus a warnings summary, and `git status` lists untracked build junk in about a third of the tasks.
+## Contents
 
-*Full model calls* are T4 calls (the whole conversation). *Small calls* are T2/T3 subcalls (a short prompt and a forced tool call); their tokens are included in *tokens / task*. *Served by replay* counts tool calls that no full model call produced, T2/T3 steps included. Seed 0:
+[Status](#status) · [Quickstart](#quickstart) · [Results](#results) · [How it works](#how-it-works) · [Replay safety](#replay-safety) · [Compatibility with current Claude models](#compatibility-with-current-claude-models) · [Decisions](#decisions) · [Known limits](#known-limits) · [CLI reference](#cli-reference) · [Configuration](#configuration) · [Development](#development)
 
-| mode | tasks | full model calls / task | small calls / task | tokens / task | served by replay | success | sim. wall-clock / task |
-|---|---|---|---|---|---|---|---|
-| plain agent | 151–200 | 6.02 | – | 6,196 | 0% | 96% | 10.0 s |
-| treejit, read-only allowlist | 151–200 | 3.70 | 0.14 | 4,820 | 48% | 100% | 6.3 s |
-| treejit, edges approved | 41–50 | 1.10 | 0.80 | 2,169 | 98% | 100% | 2.5 s |
-| treejit, edges approved | 151–200 | **1.06** | 0.90 | 2,038 | **99%** | 100% | 2.6 s |
-| treejit, edges approved + compaction | 151–200 | **1.06** | 0.90 | **1,893** | **99%** | 100% | 2.6 s |
+## Status
 
-Seeds 0–5. Success is over all 200 tasks; the other columns are tasks 151–200 (plain agent / allowlist / approved / approved + compaction). Seed 3 was re-measured after decisions 16–17; the other rows predate them:
+States: **done** (implemented and tested offline), **opt-in** (done, off by default), **unverified live** (done, but only checked against documentation, fakes or a design note), **not yet**.
 
-| seed | success (of 200) | full calls / task | small calls / task | tokens / task | served |
-|---|---|---|---|---|---|
-| 0 | 193 / 198 / 200 / 200 | 6.02 / 3.70 / 1.06 / 1.06 | – / 0.14 / 0.90 / 0.90 | 6,196 / 4,820 / 2,038 / 1,893 | 0 / 48 / 99 / 99% |
-| 1 | 189 / 198 / 200 / 200 | 6.36 / 4.20 / 1.02 / 1.02 | – / 0.02 / 0.28 / 0.28 | 6,684 / 5,311 / 1,637 / 1,445 | 0 / 41 / 100 / 100% |
-| 2 | 192 / 198 / 200 / 200 | 6.32 / 4.12 / 1.00 / 1.00 | – / 0.00 / 0.78 / 0.78 | 6,711 / 5,279 / 1,931 / 1,734 | 0 / 39 / 100 / 100% |
-| 3 | 189 / 198 / 200 / 200 | 6.26 / 4.20 / 1.04 / 1.04 | – / 0.10 / 0.94 / 0.94 | 6,590 / 5,406 / 2,026 / 1,943 | 0 / 42 / 99 / 99% |
-| 4 | 185 / 198 / 199 / 199 | 6.28 / 4.08 / 1.02 / 1.02 | – / 0.10 / 1.20 / 1.20 | 6,744 / 5,513 / 2,315 / 2,248 | 0 / 45 / 100 / 100% |
-| 5 | 192 / 198 / 200 / 200 | 6.66 / 4.58 / 1.00 / 1.00 | – / 0.00 / 0.02 / 0.02 | 7,401 / 6,014 / 1,452 / 1,407 | 0 / 37 / 100 / 100% |
-
-- With edges approved (`treejit approve '*'`, which simulates operator review of write steps and commit points), almost every tool call is served from about task 40 on; the only full call left is usually the final answer. With the default read-only allowlist, only read steps replay, and T2/T3 rarely apply (their options must be replayable too).
-- treejit never does worse than the plain agent on these seeds. The remaining failures are the simulated model's own shortcuts at steps it still decides (allowlist mode), Seed 3 no longer misroutes (below).
-- **Seed 3 used to regress** (171/200 with edges approved, 86% success in tasks 151–200). The node after `git status` had learned the decision-list rule `task~src → git rm` from 2 delete-module tasks and 1 typo task in `README.md`. From task 13 on, it replayed `git rm` into every typo task whose file is under `src/`: 28 failed runs. The failures never reached the rule. Blame goes to edges, and `git rm` was right at that node for other tasks. Replayed steps never become examples, so the inputs the rule misrouted stopped producing evidence. Decisions 12–13 below fix this. One misroute was left (task 13): by then the rule had 5 supporting delete tasks and no counterexample. Decision 16 removes it: the typo task resembles none of those delete tasks, so it gets a T2 call instead, and seed 3 reaches 200/200.
-- Small calls are mostly T3 fills (the free-form commit message, the `Edit` strings) and budget checkpoints. Few of them fall back to T4 ("something else", `not_this_step`): 8 of 127 at seed 0.
-- Running the same stream through the real ASGI proxy with SSE streaming (`--via-proxy`) gives identical numbers.
-- The floor is one full model call per task, because the final answer is always generated.
-- In the simulation a small call costs about 45% of a full call's tokens (~450 vs ~1,080), because the simulated system prompt, tools and conversation are tiny. A real harness sends far more per call (Claude Code: tens of thousands of tokens), so the token column understates what T2/T3 save. `--payload` and `--cache` re-price the same trajectories (below).
-- **Caveats:** the model and its token counts are simulated (tokens ≈ prompt chars / 4, latency = 600 ms + 15 ms/output token), so treat the absolute numbers as illustrative. tau-bench results with an oracle agent are [below](#tau-bench); real-model traffic hasn't been run yet.
-
-Report: [`docs/learning_curve.html`](docs/learning_curve.html) (model calls, tokens, replay share and small calls vs task index, with a table view).
-
-### Cost model: harness payload and prompt caching
-
-`--payload none|tau|claude-code` adds a virtual harness system prompt plus tool schemas to every **full** call's input (0 / ~5k / ~24k tokens). T2/T3 subcalls are built by treejit and never carry it. `--cache` models Anthropic prompt caching: breakpoints after the static prefix, after the system prompt, and at the last message of each request (automatic caching). A request reads the longest prefix an earlier request wrote and writes the rest. With either flag the CSV gains `cache_read`, `cache_write`, `cost_tokens` and `small_cost`. `cost_tokens` is in input-token equivalents: uncached input 1×, cache write 1.25×, cache read 0.1×, output 5× (`--cost-weights W,R,O`). The default output is unchanged: the seed-0 CSV is identical task for task, apart from the timing columns. The report gains a cost panel.
-
-Seed 0, 200 tasks, tasks 151–200:
-
-| scenario | plain agent cost / task | treejit, edges approved | cut | small-call cost / full-call cost |
-|---|---|---|---|---|
-| sim as-is (no payload) | – | – | – | ≈0.5 (`repro/E2_out_seed0.txt`) |
-| `--payload tau` | 37,989 | 7,711 | −80% | 0.136 |
-| `--payload claude-code` | 152,369 | 27,851 | −82% | **0.035** |
-| `--payload claude-code --cache` | 18,032 | 4,721 | −74% | 0.239 |
-
-With a payload the size of Claude Code's, a small call costs about 3.5% of a full call. With caching, full calls get about 8× cheaper, because most of the prompt is a cache read. The small calls' relative cost then rises to about a quarter of a full call. T2/T3 still pay off, but by less.
-
-## tau-bench
-
-`bench/src/treejit_bench/taubench.py` runs [tau-bench](https://github.com/sierra-research/tau-bench) tasks through treejit inline mode. It scores them with tau-bench's own `Env.calculate_reward`: the database hash after the episode must equal the hash after the ground-truth actions, and every expected output must appear in a reply. tau-bench isn't on PyPI. Its environments need only `pydantic`. When `litellm` isn't installed, a stub module is inserted; the user simulator is never called.
-
-```bash
-git clone --depth 1 https://github.com/sierra-research/tau-bench && pip install pydantic
-export TAUBENCH_PATH=$PWD/tau-bench        # tests/test_taubench.py skips without it
-python -m treejit_bench --suite taubench --tau-env retail --tau-split test --modes baseline,treejit,treejit+ok --out tau_out
-#   --tasks N --tau-start I     a slice (default: the whole split; retail test 115, train 500, dev 20; airline test 50)
-#   --noise P                   the oracle's per-write slip probability (default 0.05)
-#   --agent claude [--claude-model claude-opus-5] [--tau-user confirm]    a real model (needs ANTHROPIC_API_KEY and anthropic)
-#   --rebuild-every K           rebuild the tree after every K-th outcome (faster; changes learning dynamics, see below)
-```
-
-- **Tools and prompt.** tau-bench's `tools_info` (OpenAI function specs) become Anthropic tools, the policy wiki is the system prompt, and the task instruction is the first user message. The environment's data is serialized to JSON once and restored before each task and for the reward's replay.
-- **OracleAgent.** A deterministic agent. It makes a canonical read prefix, then the task's ground-truth actions, then a final answer containing the expected outputs. The retail prefix is `find_user_id_by_email` (or `…_by_name_zip`), `get_user_details`, `get_order_details` per order, and `get_product_details` for new items. The airline prefix is `get_user_details` and `get_reservation_details`. With probability `--noise` per write step, the oracle *slips*: a wrong reason, a dropped item, a wrong payment method, and so on. Slips depend only on (seed, env, split, task index), so every mode sees the same model mistakes. The oracle answers T2/T3 subcalls with the same policy. With noise 0 it scores reward 1.0 on all 115 retail test tasks, all 500 retail train tasks and all 50 airline test tasks.
-- **ClaudeAgent** (`--agent claude`) sends the same bodies to a real model through the Anthropic SDK. In treejit modes it runs through `jit.wrap(agent)`. It sets a cache breakpoint on the system prompt plus automatic caching, and accounts `cache_read_input_tokens` / `cache_creation_input_tokens`. Real models ask for confirmation before writes (the wiki requires it), so use `--tau-user confirm`. treejit currently splits such multi-turn episodes (PLAN M1). T2/T3 subcalls use structured outputs (`output_config.format`), never a forced `tool_choice`, so they work on Claude Fable 5.1, Mythos 5.1 and Opus 5.5 too (see [Compatibility](#compatibility-with-current-claude-models)). This path is tested only against a fake SDK client, since there is no API key here.
-- **ScriptedUser.** Single-turn by default: the episode ends at the agent's first text reply. `confirm` answers up to 4 agent questions with "Yes, I confirm."
-
-**Results.** Oracle, seed 0, noise 0.05, retail. There is no payload: the real wiki and 16 tool schemas (~5k tokens) are in every body. Cost is in input-token equivalents, without the cache model.
-
-| split | mode | tasks | full calls / task | small calls / task | tokens / task | cost / task | served by replay | reward |
-|---|---|---|---|---|---|---|---|---|
-| test | plain agent | 1–115 | 7.75 | – | 41,627 | 43,938 | 0% | 0.939 |
-| test | treejit, read-only allowlist | 1–115 | 4.13 | 3.21 | 29,633 | 31,420 | 65% | 0.939 |
-| test | treejit, edges approved | 1–115 | 3.76 | 3.63 | 28,084 | 29,828 | 69% | 0.939 |
-| test | treejit, edges approved + compaction | 1–115 | 3.76 | 3.63 | 27,445 | 29,189 | 69% | 0.939 |
-| test | treejit, edges approved, `--rebuild-every 10` | 1–115 | 4.31 | 3.57 | 29,244 | 31,144 | 52% | 0.939 |
-| train | plain agent | 1–300 | 6.94 | – | 36,684 | 38,737 | 0% | 0.940 |
-| train | treejit, read-only allowlist | 1–300 | 3.50 | 1.08 | 23,125 | 24,341 | 62% | 0.940 |
-| train | treejit, edges approved | 1–300 | 2.44 | 3.27 | 19,313 | 20,534 | 78% | 0.940 |
-| train | treejit, edges approved | 251–300 | 2.02 | 3.16 | 16,170 | 17,233 | 83% | 0.920 (plain agent 0.920) |
-| airline test | plain agent / allowlist / edges approved | 1–50 | 5.20 / 3.52 / 3.30 | – / 1.12 / 1.88 | 25,409 / 19,456 / 19,443 | | 0 / 40 / 45% | 0.98 / 0.98 / 0.98 |
-
-- On the retail test split, every treejit mode has exactly the plain agent's reward: the 7 failing tasks are the oracle's slips, task for task. The read-only allowlist mode also matches the plain agent on train and airline.
-- **With edges approved, treejit used to fail retail train tasks that the plain agent passes** (149, 191, 197, 238, 243, 245 and 298 in the first runs, then 160 after the multi-turn episode changes, with reward 0.920–0.937), and airline test task 29. In every case T0/T1 (sometimes with a T3 fill) replayed an irreversible cancel that the task didn't want: `cancel_pending_order` on a pending order the task wants *modified*, or `cancel_reservation` in a read-only task. The id was the one just looked up, so the binding was right; the *choice* was wrong. `treejit explain tau-retail-train-0-238` showed `T1@r6 cancel_pending_order(...) conf=0.70`. The rule behind it was `json.status == "pending" → cancel_pending_order` at that node: 5 model-chosen examples, 4 cancels and 1 that went on to modify (purity exactly 0.8, support 4, one leak). An observation rule needed only 2 supporting examples, and nothing else looked at the task. Status "pending" is where both cancel and modify happen; only the task text tells them apart. Decision 24 fixes this: all of these tasks now pass, and retail train 300, retail test 115 and airline test 50 fail exactly the plain agent's tasks (the oracle's slips), task for task. On train, 14 commit-point writes were replayed by T0/T1 and 12 had their structure picked by T0/T1 with a T3 fill; after the fix, 3 and 1 are. The others go to T2 and cost 0.03 small calls per task (3.24 → 3.27). Full calls per task (2.44) and the served share (78%) don't change, because T2 answers with the values in the same small call that a T3 fill used to spend. With the default allowlist these steps always went to the model, so nothing was lost there.
-- Small calls are frequent (2–3.6 per task). Most retail steps have their structure decided, but no binding produces a value this input needs (order id, item ids, reason), so a T3 fill asks for it. A small call costs 0.19–0.21 of a full call here, because every full call carries the ~5k-token wiki and tools.
-- **Rebuild cost.** The tree is rebuilt after each outcome, and on tau-bench data that dominates the run time. Each treejit mode took 6–13 minutes on test 115 and about 35 minutes on train 300 on this machine (4 runs in parallel), against 40 s and 100 s for the plain agent (PLAN P1). `--rebuild-every K` rebuilds only after every K-th outcome and keeps serving the stale tree in between. That changes the learning dynamics, because evidence from the last K−1 runs isn't visible yet: K=10 served 52% instead of 69% on test, in 93 s. The default is K=1.
-- The numbers differ slightly from the prototype's (`repro/E1_tau_proto.py`). The prototype drew slips per instruction text, and some of its slips had no effect. The runner keys slips on the task index and always perturbs an argument.
+| Feature | State |
+|---|---|
+| Anthropic Messages and OpenAI Chat Completions dialects, JSON and SSE (replay and pass-through) | done |
+| OpenAI Responses API (`POST /v1/responses`, inline `client.responses.create`, JSON and SSE, Codex argv shell args) | done for stateless requests; **unverified live** (built from the public reference, not a captured Codex trace); `previous_response_id` / `conversation` pass through unlearned |
+| Current Claude models (Fable 5.1, Mythos 5.1, Opus 5.5): structured-output subcalls, sticky append-only hints, model-aware thinking drop | done, **unverified live** (`repro/X2_live_check.py` checks it once a key exists) |
+| Trace recorder, system-prompt family keying (masked line sets), span-preserving shell tokenizer | done |
+| Tree builder: anti-unification, provenance bindings, last-k-edge macros, root depth cap D | done |
+| Failed replays as negative evidence, earned task-word rules with a similarity gate, per-input-class negatives, END as a choice | done |
+| T0 replay / T1 guarded branch, postcondition side exits, confidence budget, hard cap K, batching | done |
+| T2 choose / budget checkpoint, T3 hole filling (one small structured subcall, proxy and inline) | done |
+| Read-only allowlist, commit points (incl. opaque executors), operator approval, `--not-commit`, repo-config taint | done |
+| Contested commit points go to the model (T2) instead of a majority replay | done |
+| Run identity (header, harness session id, derived; forks instead of extending finished runs), multi-turn episodes | done |
+| Background rebuilds under the proxy, memoized builder, cross-process view reload | done |
+| Frontier prefix compaction (first-sight, append-only; `epoch` and `window` modes) | **opt-in** (`compact = true`) |
+| Frontier hints on T4 calls (sticky, append-only) | done (`hints = "failures"` by default) |
+| Inline mode, including streaming (`stream=True`, Anthropic `messages.stream()`) | done for sync clients; async clients: use the proxy |
+| CLI (`serve show runs explain outcome pending pin approve revoke prune export build stats`), HTML / Mermaid / SKILL.md export | done |
+| Benchmark: synthetic suite (inline and real-proxy modes), learning-curve report, cost model (`--payload`, `--cache`) | done |
+| tau-bench runner (`--suite taubench`, oracle-with-noise agent, tau-bench's own reward) | done |
+| tau-bench with a real model (`--agent claude`) | **not yet run** (ready; needs `ANTHROPIC_API_KEY`) |
+| Macros-as-tools | **not yet** (deferred, PLAN E5: measured headroom too small) |
+| Incremental (dirty-node) rebuild | **not yet** |
 
 ## Quickstart
 
@@ -143,6 +62,31 @@ claude
 
 No run header is needed: Claude Code's session id (in `metadata.user_id`) plus the episode index names each task's run, and every prompt after a finished answer starts a new episode (see [Runs and episodes](#runs-and-episodes)).
 
+**OpenAI-compatible harnesses (Chat Completions):** point `OPENAI_BASE_URL` at `http://127.0.0.1:8787/v1`.
+
+**Codex-style harnesses (OpenAI Responses API)**
+
+```bash
+export OPENAI_BASE_URL=http://127.0.0.1:8787/v1     # treejit forwards /v1/responses to openai_upstream
+codex                                                # or any client of POST /v1/responses
+```
+
+treejit learns from and replays *stateless* Responses traffic, where every request carries the whole conversation in `input` (as Codex CLI does with `store: false`, according to `repro/R1_responses_design.md`; not yet checked against a captured Codex trace). The run is named from `prompt_cache_key` plus the episode. Codex's `shell` tool sends argv lists (`{"command": ["bash", "-lc", "git status"]}`): policy and templates read the script inside `bash -lc` / `sh -c`, and any other argv as `shlex.join(argv)`, so read-only commands replay without approval as the string form does. Requests that chain on the server (`previous_response_id`, `conversation`) are forwarded untouched and never learned from (tier `pass`, note `stateful`), because a replayed response id (`resp_tj...`) would be unknown upstream.
+
+**Inline mode** (harnesses you own, tests)
+
+```python
+from treejit import TreeJIT
+jit = TreeJIT("treejit.db")
+client = jit.wrap(anthropic.Anthropic())             # or openai.OpenAI(), or a callable body -> dict
+client.messages.create(..., extra_headers={"X-TreeJIT-Run": "task-17"})
+with client.messages.stream(..., extra_headers={"X-TreeJIT-Run": "task-17"}) as s:
+    msg = s.get_final_message()
+jit.outcome("task-17", "pass")
+```
+
+`jit.wrap(openai.OpenAI())` wraps both `chat.completions.create` and `responses.create`; a plain callable takes `dialect="anthropic" | "openai" | "responses"`. Streaming takes the same path as JSON. A replay returns a `ReplayStream` (the replay's events, served locally, as SDK event models when the SDK is installed and as dicts otherwise). A forward returns a `TeeStream`: the upstream events, unchanged, recorded (usage, run, END) when the stream is exhausted; closing it before the stop reason records status 499 and no END. Anthropic's `messages.stream()` is the SDK's own `MessageStreamManager` fed by those streams (a minimal shim without the SDK). `X-TreeJIT-Run` never goes upstream. Everything else on the client (`messages.count_tokens`, `batches`, `beta`, `with_raw_response`, ...) is the real client's and is not recorded.
+
 **Outcomes.** Only runs reported as passing ever promote an edge.
 
 ```bash
@@ -152,294 +96,378 @@ treejit outcome <run_id|latest> fail --reason "tests failed in CI"
 
 In Claude Code, a `Stop` hook that runs your verifier and then posts `/outcome` closes the loop. Outcome `error` (timeouts, 429s) is recorded but never counted as evidence.
 
-**Rebuilds.** Each outcome rebuilds its family's tree. Under `treejit serve` the rebuild runs on a background worker thread (`rebuild = "auto"`, the default), so an outcome never stalls other requests: they keep the previous tree until the new one is swapped in. Outcomes that arrive during a build are coalesced into one more build of that family. `/outcome` still answers only once the tree is rebuilt, so the next request sees it; post `"wait": false` to get the answer as soon as the outcome is recorded. Inline mode and the CLI rebuild synchronously, before `jit.outcome()` returns, which keeps benchmark numbers deterministic. `rebuild = "sync"` or `"background"` (`TREEJIT_REBUILD`) forces either mode; `jit.wait_rebuilds()` waits for pending background builds. A running proxy also notices a rebuild made by another process (`treejit outcome ...`, a second instance on the same db): each request compares the family's `built_at` with its cached view's and reloads the view when they differ.
+**Rebuilds.** Each outcome rebuilds its family's tree. Under `treejit serve` the rebuild runs on a background worker (`rebuild = "auto"`), so an outcome never stalls other requests; outcomes that arrive during a build are coalesced. `/outcome` answers once the tree is rebuilt (post `"wait": false` to get the answer as soon as the outcome is recorded). Inline mode and the CLI rebuild synchronously, which keeps benchmark numbers deterministic; `jit.wait_rebuilds()` waits for pending background builds. A running proxy also notices a rebuild made by another process (the CLI, a second instance on the same db) through the family's `built_at`.
 
-**OpenAI-compatible harnesses:** point `OPENAI_BASE_URL` at `http://127.0.0.1:8787/v1`.
+**Operating it.** `treejit show --ids` prints the tree, `treejit pending` lists edges held back only by policy, `treejit approve --review` walks that queue, and `treejit explain <run|latest>` shows who decided each step of a run. See the [CLI reference](#cli-reference).
 
-**Codex-style harnesses (OpenAI Responses API)**
+## Results
+
+All numbers in this section were measured at the same commit, with the commands given. The model is simulated (synthetic suite) or an oracle (tau-bench): treat absolute numbers as illustrative, and the comparisons between modes as the result.
+
+Terms: *full calls* are T4 calls (the whole conversation). *Small calls* are T2/T3 subcalls (a short prompt and a structured answer); their tokens are included in *tokens / task*. *Served* is the share of tool calls that no full model call produced (T0/T1/T2/T3 steps). Modes: *plain agent* (`baseline`), *read-only allowlist* (`treejit`: only read-only steps replay unattended), *edges approved* (`treejit+ok`: `treejit approve '*'`, simulating operator review of write steps and commit points), and *+ compaction* (`treejit+ok+compact`).
+
+### Synthetic suite
+
+A simulated agent works a mixed stream of coding tasks (typo fix / version bump / delete module, each with a flaky-test branch) and tau-bench-style retail tasks (branching on order status). The tree starts empty. The simulated model sees only the conversation, is stochastic (argument formatting varies, free-form commit messages), and takes a known-bad shortcut 6% of the time. Observations are realistically sized (a 45–65-line `Read`, 150–420 pytest progress rows, untracked build junk in `git status`). Tokens ≈ prompt chars / 4; latency = 600 ms + 15 ms per output token.
+
+Seed 0 (`python -m treejit_bench --tasks 200 --seed 0 --modes baseline,treejit,treejit+ok,treejit+ok+compact`):
+
+| mode | tasks | full calls / task | small calls / task | tokens / task | served | success | sim. wall-clock / task |
+|---|---|---|---|---|---|---|---|
+| plain agent | 151–200 | 6.02 | – | 6,196 | 0% | 96% | 10.0 s |
+| read-only allowlist | 151–200 | 3.70 | 0.14 | 4,932 | 48.5% | 100% | 6.2 s |
+| edges approved | 41–50 | 1.10 | 0.80 | 2,152 | 98.4% | 100% | 2.4 s |
+| edges approved | 151–200 | **1.02** | 0.92 | 2,000 | **99.6%** | 100% | 2.3 s |
+| edges approved + compaction | 151–200 | **1.02** | 0.92 | **1,848** | **99.6%** | 100% | 2.3 s |
+
+Seeds 0–5 (same command with `--seed S`). Success is over all 200 tasks; the other columns are tasks 151–200. Each cell lists plain agent / allowlist / approved / approved + compaction (compaction doesn't change calls or served share, so those columns list three values):
+
+| seed | success (of 200) | full calls / task | small calls / task | tokens / task | served % |
+|---|---|---|---|---|---|
+| 0 | 193 / 198 / 200 / 200 | 6.02 / 3.70 / 1.02 | – / 0.14 / 0.92 | 6,196 / 4,932 / 2,000 / 1,848 | 0 / 48.5 / 99.6 |
+| 1 | 189 / 199 / 200 / 200 | 6.36 / 4.26 / 1.06 | – / 0.06 / 0.30 | 6,684 / 5,342 / 1,531 / 1,378 | 0 / 39.6 / 98.9 |
+| 2 | 192 / 198 / 200 / 200 | 6.32 / 4.12 / 1.04 | – / 0.00 / 0.80 | 6,711 / 5,423 / 1,972 / 1,775 | 0 / 38.6 / 99.2 |
+| 3 | 189 / 198 / 200 / 200 | 6.26 / 4.20 / 1.06 | – / 0.10 / 0.94 | 6,590 / 5,554 / 2,031 / 1,861 | 0 / 41.8 / 98.9 |
+| 4 | 185 / 198 / 199 / 199 | 6.28 / 4.08 / 1.06 | – / 0.10 / 1.20 | 6,744 / 5,652 / 2,337 / 2,165 | 0 / 44.8 / 98.9 |
+| 5 | 192 / 199 / 200 / 200 | 6.66 / 4.62 / 1.02 | – / 0.06 / 0.06 | 7,401 / 6,203 / 1,484 / 1,262 | 0 / 36.9 / 99.7 |
+
+- **Invariant check (PLAN): holds on every seed.** Both treejit modes succeed at least as often as the plain agent. Every failure in a treejit mode is the simulated model's own shortcut ("pushed without a passing test run") at a step the model decided (tier `M` in `results.csv`), never at a replayed step. Because the model is stochastic and replay changes how many draws it makes, a treejit mode can fail a task the plain agent passed (allowlist mode: 1–2 tasks per seed; edges approved: seed 4 task 0, where the tree is still empty); the plain agent fails 8–15 per seed.
+- With edges approved, almost every tool call is served from about task 40 on; the only full call left is usually the final answer. The floor is one full call per task, because the final answer is always generated.
+- With the default read-only allowlist, only read steps replay, and T2/T3 rarely apply (their options must be replayable too).
+- Small calls are mostly T3 fills (the free-form commit message, `Edit` strings) and budget checkpoints. Few fall back to T4: at seed 0 with edges approved, 5 of 132 small calls failed (`failed:` in the request note).
+- Seed 3 used to regress (171/200 with edges approved) because a chance task-word rule (`task~src → git rm`) misrouted typo tasks. Decisions 11–16 fixed it; seed 3 is 200/200.
+- Running the same stream through the real ASGI proxy with SSE streaming (`--via-proxy`) gives identical numbers (checked at seed 0 with `--via-proxy --modes baseline,treejit,treejit+ok`).
+
+Report: [`docs/learning_curve.html`](docs/learning_curve.html) (seed 0; model calls, tokens, replay share and small calls vs task index, with a table view). Summary: [`docs/bench_summary.json`](docs/bench_summary.json).
+
+**Compaction.** Over all 200 tasks, `treejit+ok+compact` (first-sight) vs `treejit+ok`; trajectories (success, calls, tiers) are identical task for task on every seed:
+
+| seed | 0 | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|---|
+| tokens / task, off → on | 2,154 → 1,986 | 1,815 → 1,674 | 2,271 → 2,098 | 2,287 → 2,129 | 2,276 → 2,118 | 1,932 → 1,752 |
+| change | −7.8% | −7.8% | −7.6% | −6.9% | −7.0% | −9.3% |
+| compacted chars / task | 624 | 523 | 618 | 583 | 585 | 660 |
+
+### Cost model: harness payload and prompt caching
+
+In the sim a small call costs about half a full call (seed 0, edges approved, tasks 151–200: 696 vs 1,333 tokens), because the simulated system prompt, tools and conversation are tiny. A real harness sends far more per full call. `--payload none|tau|claude-code` adds a virtual harness system prompt plus tool schemas to every **full** call (0 / ~5k / ~24k tokens); T2/T3 subcalls are built by treejit and never carry it. `--cache` models Anthropic prompt caching (breakpoints after the static prefix, after the system prompt, and at the last message; a request reads the longest prefix an earlier one wrote). `cost_tokens` is in input-token equivalents: uncached input 1×, cache write 1.25×, cache read 0.1×, output 5× (`--cost-weights`). The default output is unchanged.
+
+Seed 0, tasks 151–200, cost / task (`--payload P [--cache]`, same trajectories as above):
+
+| scenario | plain agent | read-only allowlist | edges approved | cut (approved) | small-call cost / full-call cost |
+|---|---|---|---|---|---|
+| `--payload tau` | 37,989 | 24,475 | 7,411 | −80% | 0.12 |
+| `--payload claude-code` | 152,369 | 94,775 | 26,791 | −82% | **0.03** |
+| `--payload claude-code --cache` | 18,032 | 11,672 | 4,552 (4,362 with compaction) | −75% (−76%) | 0.22 |
+
+With a Claude Code-sized payload a small call costs about 3% of a full call. With caching, full calls get about 8× cheaper, because most of the prompt is a cache read; small calls then cost about a fifth of a full call. T2/T3 still pay off, by less.
+
+### tau-bench
+
+`bench/src/treejit_bench/taubench.py` runs [tau-bench](https://github.com/sierra-research/tau-bench) tasks through treejit inline mode and scores them with tau-bench's own `Env.calculate_reward` (the database hash after the episode must equal the ground truth's, and every expected output must appear in a reply). tau-bench isn't on PyPI; its environments need only `pydantic`, and a `litellm` stub is inserted when it isn't installed (the user simulator is never called).
 
 ```bash
-export OPENAI_BASE_URL=http://127.0.0.1:8787/v1     # treejit forwards /v1/responses to openai_upstream
-codex                                                # or any client of POST /v1/responses
+git clone --depth 1 https://github.com/sierra-research/tau-bench && pip install pydantic
+export TAUBENCH_PATH=$PWD/tau-bench        # tests/test_taubench.py skips without it
+python -m treejit_bench --suite taubench --tau-env retail --tau-split test --modes baseline,treejit,treejit+ok --out tau_out
+#   --tasks N --tau-start I     a slice (default: the whole split; retail test 115, train 500, dev 20; airline test 50)
+#   --noise P                   the oracle's per-write slip probability (default 0.05)
+#   --agent claude [--claude-model M] [--tau-user confirm]    a real model (needs ANTHROPIC_API_KEY and anthropic)
+#   --rebuild-every K           rebuild the tree after every K-th outcome (faster; the last K-1 runs aren't visible yet)
 ```
 
-treejit learns from and replays *stateless* Responses traffic: every request carries the whole conversation in `input` (as Codex CLI does with `store: false`, according to the design note `repro/R1_responses_design.md`; not yet checked against a captured Codex trace). The run is named from `prompt_cache_key` (Codex sets it per conversation, same caveat) plus the episode, like Claude Code's session id. Codex's `shell` tool sends argv lists (`{"command": ["bash", "-lc", "git status"]}`): policy and templates read the script inside `bash -lc` / `sh -c`, and any other argv as `shlex.join(argv)`, so read-only commands replay without approval exactly as the string form does. Requests that chain on the server (`previous_response_id`, `conversation`) are forwarded untouched and never learned from (tier `pass`, note `stateful`): a replayed response id (`resp_tj...`) would be unknown upstream. Inline: `jit.wrap(openai.OpenAI())` wraps both `chat.completions.create` and `responses.create` (`stream=True` included); a plain callable takes `dialect="responses"`.
+- **OracleAgent.** A deterministic agent: a canonical read prefix (retail: `find_user_id_by_*`, `get_user_details`, `get_order_details` per order, `get_product_details` for new items; airline: `get_user_details`, `get_reservation_details`), then the task's ground-truth actions, then a final answer with the expected outputs. With probability `--noise` per write, it *slips* (a wrong reason, a dropped item, a wrong payment method). Slips depend only on (seed, env, split, task index), so every mode sees the same mistakes. The oracle answers T2/T3 subcalls with the same policy. With noise 0 it scores 1.0 on every task of retail test, retail train and airline test.
+- **ClaudeAgent** (`--agent claude`) sends the same bodies to a real model through the Anthropic SDK (through `jit.wrap` in treejit modes), with a cache breakpoint on the system prompt and cache usage accounted. Real models ask before writes, so use `--tau-user confirm` (answers up to 4 questions with "Yes, I confirm."; episodes stay one run, see [Runs and episodes](#runs-and-episodes)). Tested only against a fake SDK client.
+- The tools are tau-bench's `tools_info` as Anthropic tools, the policy wiki is the system prompt (~5k tokens with the tool schemas, in every full call; no extra payload), and the task instruction is the first user message.
 
-**Inline mode** (harnesses you own, tests):
+**Results.** Oracle, seed 0, noise 0.05, `--rebuild-every 1` (the default). Command: `python -m treejit_bench --suite taubench --tau-env E --tau-split S --modes ...`. Cost is in input-token equivalents without the cache model.
 
-```python
-from treejit import TreeJIT
-jit = TreeJIT("treejit.db")
-client = jit.wrap(anthropic.Anthropic())             # or an OpenAI client, or a callable body -> dict
-client.messages.create(..., extra_headers={"X-TreeJIT-Run": "task-17"})
-with client.messages.stream(..., extra_headers={"X-TreeJIT-Run": "task-17"}) as s:  # streaming works too
-    msg = s.get_final_message()
-jit.outcome("task-17", "pass")
-```
+| split | mode | tasks | full calls / task | small calls / task | tokens / task | cost / task | served | reward |
+|---|---|---|---|---|---|---|---|---|
+| retail test | plain agent | 1–115 | 7.75 | – | 41,627 | 43,938 | 0% | 0.939 |
+| retail test | read-only allowlist | 1–115 | 4.04 | 3.33 | 29,404 | 31,000 | 66% | 0.939 |
+| retail test | edges approved | 1–115 | 3.64 | 3.74 | 27,655 | 29,179 | 70% | 0.939 |
+| retail test | edges approved + compaction | 1–115 | 3.64 | 3.74 | 27,425 | 28,949 | 70% | 0.939 |
+| retail test | edges approved | 66–115 | 2.92 | 3.80 | 23,239 | 24,579 | 77% | 0.900 (plain agent 0.900) |
+| retail train | plain agent | 1–300 | 6.94 | – | 36,684 | 38,737 | 0% | 0.940 |
+| retail train | read-only allowlist | 1–300 | 3.54 | 2.09 | 23,802 | 25,051 | 61% | 0.940 |
+| retail train | edges approved | 1–300 | 2.44 | 3.27 | 19,273 | 20,300 | 78% | 0.940 |
+| retail train | edges approved | 251–300 | 2.02 | 3.16 | 16,127 | 17,004 | 83% | 0.920 (plain agent 0.920) |
+| airline test | plain agent | 1–50 | 5.20 | – | 25,409 | 27,036 | 0% | 0.980 |
+| airline test | read-only allowlist | 1–50 | 3.48 | 1.16 | 19,294 | 20,543 | 41% | 0.980 |
+| airline test | edges approved | 1–50 | 3.30 | 1.88 | 19,408 | 20,669 | 45% | 0.980 |
 
-Streaming (`create(stream=True)`) takes the same path as JSON. A replay returns a `ReplayStream`: the replay's events, served locally, as SDK event models (`RawMessageStreamEvent`, `ChatCompletionChunk`, `ResponseStreamEvent`) when the SDK is installed and as dicts otherwise. A forward returns a `TeeStream`: the upstream events, unchanged, recorded (usage, run, END) when the stream is exhausted. Closing it before the stop reason arrives records status 499 and no END. Anthropic's `messages.stream()` is the SDK's own `MessageStreamManager` fed by those streams (`text_stream`, `get_final_message()`, derived `text`/`input_json` events); without the SDK a minimal shim with the same methods is used. `X-TreeJIT-Run` never goes upstream. Everything else on the client (`messages.count_tokens`, `messages.batches`, `beta`, `with_raw_response`, ...) is the real client's and is not recorded.
+Commands: retail test `--tau-env retail --tau-split test --modes baseline,treejit,treejit+ok,treejit+ok+compact`; retail train `--tau-env retail --tau-split train --tasks 300 --modes baseline,treejit,treejit+ok`; airline `--tau-env airline --tau-split test --modes baseline,treejit,treejit+ok`.
 
-**Inspect and operate**
-
-```bash
-treejit show --ids          # tree with tiers, bindings, guards, decision lists, macros; short node/edge ids
-treejit runs; treejit stats
-treejit explain <run|latest> [--json]   # per-step timeline: who decided each step (model/T0/T1/T2/ck/T3/user), why, tokens
-treejit pending [--family F] [--json]   # promoted edges held back only by policy: example call, evidence, approve commands
-treejit approve --review                # walk the queue: y = at the listed nodes, e = everywhere, n/s = leave, q = stop
-treejit approve <edge|'*'> [--node N]   # let replay cross a write edge / commit point
-treejit approve <edge> --not-commit     # ...and declare an opaque edge (./run_checks.sh) not a commit point; never implied by '*'
-treejit revoke <edge> [--node N] [--not-commit]   # same as approve --revoke (--not-commit: withdraw only that)
-treejit pin <node> [edge]               # force-promote, protect from eviction
-treejit prune --days 30 --min-hits 3
-treejit export --format html|mermaid|skills --out ...
-```
-
-Ids (edges, nodes, families, runs) can be given as any unique prefix of at least 4 characters; the CLI prints 8. `--db` and `--config` go before or after the subcommand.
-
-`explain` accounts for every logged request of the run, so its token total equals the `requests` table's for that run. The header line counts small calls (`small calls: N (M failed), T tokens`). A step is labelled by what produced it: `model`, `T0`/`T1` (replay), `T2` (the model picked it among known children), `ck` (the model confirmed it at a budget checkpoint) or `T3` (the model filled its holes), read from the call id's suffix. A small call that failed shows as its own row (`(T2 small call failed: chose_new → model)`), followed by the model's step. A text answer the conversation went on after reads `replied to the user`, and later user turns show as `user` rows between the steps.
-
-Each tree edge has a tier: **hot** (replayable), **live** (promoted but blocked), **warm** (one passing run), **cold**, or **tomb**. `show` prints why a live edge doesn't replay: `LIVE:holes` (an argument has no binding), `LIVE:needs_approval` (not read-only, or a commit point), or `LIVE:commit_point_needs_evidence` (approved, but a commit point also needs `promote_runs + 1` passing runs). Only the last two appear in `pending`: approval can't fix holes or tombstones.
+- **Invariant check (PLAN): holds on every split, task for task.** Every treejit mode fails exactly the plain agent's tasks, which are the oracle's slips (retail test: 7 tasks; retail train 300: 18; airline test: 1; ids in each run's `results.csv`). No treejit mode fails a task the plain agent passes. With noise 0 the plain agent scores 1.000 on retail test 115, retail train 500 and airline test 50.
+- **The B1 misroutes are gone.** Before decision 21, edges-approved runs failed retail train tasks 149, 191, 197, 238, 243, 245, 298 (later 160) and airline test task 29, which the plain agent passes: T0/T1 replayed an irreversible `cancel_pending_order` into tasks that wanted a *modify* (`treejit explain tau-retail-train-0-238` showed `T1@r6 cancel_pending_order(...) conf=0.70`, from a rule `json.status == "pending" → cancel` right in 4 of 5 examples), or `cancel_reservation` into a read-only airline task. All of these tasks now pass.
+- Small calls are frequent (1.2–3.8 per task): most retail steps have their structure decided, but no binding produces a value this input needs (order id, item ids, reason), so a T3 fill asks for it, and contested commit points get a T2 call. A small call costs 0.13–0.20 of a full call here (`small/full cost` column of the runner), because every full call carries the ~5k-token wiki and tools.
+- On airline, edges approved spends slightly more tokens than the allowlist (19,408 vs 19,294 per task) for 0.18 fewer full calls and 0.72 more small calls: on a split this small, the small calls cost about what the saved full calls do.
+- Compaction saves 0.8% of tokens on retail test (775 compacted chars per task): most frontier calls follow few replayed steps.
+- **Run time.** With the default `--rebuild-every 1`, each treejit mode took about 2.5 minutes on retail test 115 and 12 minutes on retail train 300 (4 runs in parallel on 4 cores), against 40 s and 91 s for the plain agent. `--rebuild-every K` is faster but changes the learning dynamics (the last K−1 runs aren't visible yet).
 
 ## How it works
 
 | module | job |
 |---|---|
-| `dialects.py` | Anthropic Messages, OpenAI Chat Completions, OpenAI Responses. Parse requests into an *episode* (task + (call, observation) steps, with later user turns as user steps; see [Runs and episodes](#runs-and-episodes)) and read harness session ids. Build replay responses as JSON or SSE. Accumulate upstream SSE for usage. Insert hints at a history position. Classify models by how `thinking` behaves. |
-| `families.py` | Tree key = tool schemas + the stable lines of the system prompt. Lines are masked (dates, times, absolute paths, hashes, uuids, URLs, numbers; git status and commit-log lines collapse to one placeholder), hashed and counted per family, weighted by length. A line is stable when ≥80% of the family's distinct prompts have it (every line, for a 1-member family). A prompt joins a family when it has ≥90% of the family's stable characters and the stable lines make up ≥80% of its own; ties go to the best coverage, then the oldest family. Volatile lines anywhere (an early `<env>`, a large `gitStatus`) don't split a family; a different agent sharing a short preamble doesn't merge into one. Ids never change. Families from the old prefix keying are seeded from their prefix and keep its `startswith` rule. `families.prefix` shows the stable (masked) lines. |
-| `shellwords.py` | Span-preserving shell tokenizer (quotes, `$(...)`, heredocs, operators). Replayed commands are spliced into the original text, so quoting survives. |
-| `policy.py` | What replay may emit unattended: the read-only allowlist and commit points (see [Replay safety](#replay-safety)). |
-| `templates.py` | Edge = tool + arg keys + per-segment command heads (`git commit`, `npm test`). Calls with one shape are anti-unified per token into constants and variables. argv shell arguments are templated on their command text and re-wrapped on render (`shell_text` / `unwrap`); their shapes are distinct from string commands, and string shapes are unchanged. |
+| `dialects.py` | Anthropic Messages, OpenAI Chat Completions, OpenAI Responses. Parse requests into an *episode* (task + (call, observation) steps, later user turns as user steps) and read harness session ids. Build replay responses as JSON or SSE. Accumulate upstream SSE for usage. Insert hints at a history position. Classify models by how `thinking` behaves. |
+| `families.py` | Tree key = tool schemas + the stable lines of the system prompt. Lines are masked (dates, paths, hashes, uuids, URLs, numbers; git status and log lines collapse), hashed and counted per family. A line is stable when ≥80% of the family's distinct prompts have it. A prompt joins a family when it has ≥90% of the family's stable characters and the stable lines make up ≥80% of its own. Volatile lines (an early `<env>`, a large `gitStatus`) don't split a family; a different agent sharing a short preamble doesn't merge. Ids never change. |
+| `shellwords.py` | Span-preserving shell tokenizer (quotes, `$(...)`, heredocs, operators, full ANSI-C `$'…'` decoding). Replayed commands are spliced into the original text, so quoting survives. |
+| `policy.py` | What replay may emit unattended: the read-only allowlist, commit points and repository taint (see [Replay safety](#replay-safety)). |
+| `templates.py` | Edge = tool + arg keys + per-segment command heads (`git commit`, `npm test`). Calls with one shape are anti-unified per token into constants and variables. argv shell arguments are templated on their command text and re-wrapped on render. |
 | `bindings.py` | Provenance search. Each variable binds to `$task` / `$obs[-k]` / `$arg[-k]` via extractors (JSON path, `key: value`, regex types, after-word, line, token), `fmt` templates (`Bump version to {$task.version}`) or `case` (value chosen by predicates). A variable with no rule is a hole. |
-| `features.py` | Predicate set: error/exit code, empty, JSON field equals, substring, task keyword. Guards are conjunctions of stable features; branches are decision lists. |
-| `builder.py` | Deterministic rebuild from the trace log on every outcome (bounded to the last `max_runs`): promotion, bindings, guards, postconditions, credit assignment, tombstones, tiers, priority score. |
-| `compaction.py` | Opt-in frontier prefix compaction: digests of verified replayed observations in forwarded T4 requests (below). Sticky frontier hints (`sticky_hints`). |
-| `tree.py`, `replay.py` | Stateless recognition (root path ≤ D, then last-k n-grams). Climbs T0 → T1 → T3/T2 → T4, bounded by budget, cap, allowlist and commit points. Returns T2/T3 opportunities as `plan.sub` and never calls a model itself. |
-| `subcalls.py` | Builds the T2/T3 subcall (short prompt; Anthropic: structured outputs, OpenAI: a forced `treejit_fill` / `treejit_choose` function) and parses its answer. |
-| `proxy.py`, `inline.py`, `cli.py`, `export.py`, `operate.py` | The two entry points, CLI, views, and operator tools (approval queue, run timelines, short ids). |
+| `features.py` | Predicate set: error/exit code, empty, JSON field equals, substring, task keyword. Guards are conjunctions of stable features; branches are decision lists with per-rule leak and support. |
+| `builder.py` | Deterministic, memoized rebuild from the trace log (bounded to the last `max_runs` runs): promotion, bindings, guards, postconditions, credit assignment, tombstones, tiers, stored commit reasons. |
+| `tree.py`, `replay.py` | Stateless recognition (root path ≤ D, then last-k n-grams). Climbs T0 → T1 → T3/T2 → T4, bounded by budget, cap, allowlist, commit points and taint. Returns T2/T3 opportunities as `plan.sub` and never calls a model itself. |
+| `subcalls.py` | Builds the T2/T3 subcall and parses its answer. |
+| `compaction.py` | Opt-in frontier prefix compaction and sticky frontier hints. |
+| `engine.py`, `proxy.py`, `inline.py` | The engine (run identity, recording, rebuild scheduling) and the two entry points. |
+| `cli.py`, `export.py`, `operate.py` | CLI, views, and operator tools (approval queue, run timelines, short ids). |
 
-### Decisions made during implementation
-
-The handoff didn't specify these. Each one came from a failure seen in the benchmark:
-
-1. **What the model would choose is learned only from steps the model chose.** Replayed steps still count toward success and failure, but not toward branch purity or decision lists. Otherwise replay reinforces its own guesses. The benchmark showed a misrouted-but-harmless read becoming "certain".
-2. **Side exits teach.** A replayed step that breaks its postcondition is a miss against the context that chose it. If the model then recovers and the run passes, the model's choice is recorded as the correct label at that context (DAgger-style).
-3. **Back-off needs agreement.** When the root path has too little evidence, a less specific macro context may decide, but only if it proposes something the more specific contexts have seen the model do.
-4. **Decision lists have no catch-all default.** An input no rule fires on goes to the model. Rules are scored with a penalty for firing on other labels' examples.
-5. **Bindings may abstain.** A rule that is never wrong and correct on a clear majority is kept; where it can't produce a value, that step goes to the model. A node that mixes two task types therefore keeps working for the majority instead of becoming a hole.
-6. **Stateless replay bookkeeping.** Replayed tool-call ids encode the deciding node and its confidence (`toolu_tj_<node>_<conf><rand>`), so side exits and the confidence budget need no server-side session state.
-7. **Extended thinking.** Replayed assistant turns carry no signed thinking blocks, so on models where leaving `thinking` out turns it off, a frontier call that follows replayed turns in the same episode is sent without `thinking`. On models that think by default (Fable, Mythos, Opus 5 / 5.5, Sonnet 5) the body is sent as it is: removing the parameter would change nothing but the cache prefix (see [Compatibility](#compatibility-with-current-claude-models)).
+Each tree edge has a tier: **hot** (replayable), **live** (promoted but blocked), **warm** (one passing run), **cold**, or **tomb**. `show` prints why a live edge doesn't replay: `LIVE:holes` (an argument has no binding), `LIVE:needs_approval` (not read-only, or a commit point), or `LIVE:commit_point_needs_evidence` (approved, but a commit point also needs `promote_runs + 1` passing runs). Only the last two appear in `pending`.
 
 ### T2 and T3
 
-`TreeJIT.handle()` may return `Result(kind="subcall")`: a small request body in the client's dialect. The transport (proxy or inline) sends it upstream non-streaming with the client's auth headers, then calls `jit.resume(result, response_json, status)`. That returns a normal replay (built as SSE if the client streamed) or the T4 forward. There is at most one subcall per incoming request. Any failure falls back to exactly the T4 forward the request would have had, hints included: an HTTP error, no tool call, missing or empty values, "something else", or a value that fails the safety re-checks.
+`TreeJIT.handle()` may return `Result(kind="subcall")`: a small request body in the client's dialect. The transport (proxy or inline) sends it upstream non-streaming with the client's auth headers, then calls `jit.resume(result, response_json, status)`, which returns a normal replay (as SSE if the client streamed) or the T4 forward. There is at most one subcall per incoming request, only for the first call of a response. Any failure falls back to exactly the T4 forward the request would have had: an HTTP error, no answer, missing or empty values, "something else", or a value that fails the safety re-checks.
 
-- **T3 (fill).** The structure is decided: T0/T1 picks an edge that is live, not tombstoned, and allowed by the allowlist or approvals. But some variables have no rule, or their rule abstains for this input. The subcall shows the task, all calls so far (arguments truncated to 200 chars), the last 3 tool results (2,000 chars each), and the next call with `<placeholders>`. The model answers one string per hole (with an earlier run's value as an example), or `not_this_step`. Values are spliced in as data (one quoted shell word), then the call is re-rendered and re-checked. A read-only call must stay read-only, its commit reason (`policy.commit_reason`) must be the one stored for the edge (so `sh -c 'echo a'` can't be filled into `sh -c 'git push'`, nor `make test` into `make deploy`), and the call must still match the same edge shape.
-- **T2 (choose).** Used in two cases. The first is a node with enough evidence that is ambiguous: at least 2 children the model has chosen, and the replayable ones account for at least 50% of those choices. The second is a *checkpoint*: the confidence budget runs out on an otherwise confident step, so the proposed step becomes option 1 and its siblings follow. The model answers an option number, or 0 for "something else" (→ T4). If the chosen option has holes, the same call asks for their values (`o<N>_<name>` fields). A T2 step restarts the confidence budget. The hard cap K still counts it as a replayed step.
-- **Wire shape.** Anthropic: structured outputs (`output_config.format`, a JSON schema with `additionalProperties: false` and an `enum` instead of `minimum`/`maximum`); the answer is a JSON text block, parsed tolerantly (thinking blocks, code fences, stray prose), and anything that isn't an object fitting the schema falls back to T4. `thinking` is never sent. On models that take it, `output_config.effort` is `subcall_effort` (`low`); where thinking is on by default, `max_tokens` is at least 4096 because thinking counts toward it. `subcall_format = "tool_auto"` sends one `strict` tool with `tool_choice: auto` and an instruction instead (no call → T4); `"tool"` (forced) is used automatically only for legacy `claude-3*`/`claude-2*` models without structured outputs. OpenAI Chat Completions and Responses keep a forced function call.
-- Subcalls use `small_model` if set (else the request's model) and `subcall_max_tokens`, and `t2` / `t3` switch them off. All are config keys (or `TREEJIT_*` variables). Subcalls are logged in `requests` with tier `T2` / `T3` and their own usage, and `treejit stats` shows them. Edge savings are still measured against T4 calls only.
-- Subcall steps are marked in the call id (`..._t3`, `..._t2`, `..._ck`), so recognition, side exits and the budget stay stateless.
-
-Decisions made while adding them:
-
-8. **A T2 pick is a model choice.** The model chose among known children, so the step is logged as not replayed and feeds purity and decision lists. T1 can then learn the branch and stop asking. Budget checkpoints and T3 steps are logged as replayed, because the tree proposed their structure.
-9. **Value back-off.** Once T3 serves a hole at a general (n-gram) context, the more specific contexts stop collecting model-chosen evidence, so they never become the deciding context. Their value rules are still learned from every passing instance, so a hole may borrow the rule the same edge has at a more specific context. Without this, T3 replaced free T0 steps with small calls (the version-bump commit message) and cost more tokens than it saved: 1,439 tokens/task against 1,373 before T2/T3.
-10. **One subcall, first step only.** Subcalls are only made for the first call of a response, and a T2/T3 step ends the batch.
-
-### Replay safety
-
-Replay emits a call with no model call and no human in the loop only if `policy.is_readonly` says the call is read-only. Otherwise the edge needs operator approval (`treejit approve`). A commit point (`policy.commit_reason` is non-empty: `git push`, `curl`, `send_*`, an interpreter, a script, ...) needs approval and `promote_runs + 1` passing runs. For shell commands (`policy.py`):
-
-- **One view of the program.** `shellwords.unwrap` skips `VAR=val` assignments and transparent wrappers with their own options: `env` (`-i`, `-u NAME`, `-C DIR`, `VAR=val`), `sudo`, `time`, `nohup`, `exec`, `command`, `nice`, `timeout N`, `stdbuf`. Edge shapes (`command_heads`), the read-only check and commit-point detection all use it, so `env git push origin main` has the shape `git push`, is a commit point, and is not read-only. An unrecognised wrapper option (such as `env -S`) makes the command not read-only. `sudo` is located but never counts as read-only. A bare `env`/`printenv` (with no command) is read-only.
-- **Allowlist, not denylist.** Every simple command in the line must run an allowlisted program (`ls`, `cat`, `grep`, `head`, `wc`, `jq`, `diff`, ...). The program must be a bare name or live in a standard bin directory (`./ls` doesn't count), and its name must be literal: no `$VAR`, globs, brace expansion or `$'\…'` escapes. Assignments are limited to harmless variables (`LC_*`, `LANG`, `TZ`, `TERM`, `NO_COLOR`, `PAGER=cat`, ...), which keeps out `LD_PRELOAD`, `PATH`, `GIT_EXTERNAL_DIFF` and similar.
-- **Per-program argument checks** accept only options they know. Their arguments must also be literal, since a glob can expand to a file named `--pre=x`. This keeps out:
-  - `sort -o`/`--compress-program`, `uniq IN OUT`, `date -s`/`date MMDDhhmm`, `hostname NAME`, `tree -o`/`-R`, `file -C`;
-  - `yq -i`/`-s`, `fd -x`/`-X`, `rg --pre`/`--hostname-bin`, `ag --pager`, `bat --pager`/`bat cache`;
-  - `find`'s exec/write actions (`-exec*`, `-ok*`, `-delete`, `-fprint*`, `-fls`).
-
-  `git` gets a separate check. Global options are limited to `-C`, `--git-dir`, `--work-tree`, `--no-pager` and similar (no `-c`, `--config-env` or `--exec-path`). The subcommand must be a read (`status`, `diff`, `log`, `show`, `grep`, ...) with no `--output` (or an abbreviation of it) and no `grep -O`. `branch`/`tag` are allowed only when listing, `config` only when reading a dotted key or with `--get*`/`--list`, `remote` only bare or with `show`/`get-url`, `stash` only with `list`/`show`, and `reflog` not with `expire`/`delete`/`drop`.
-- **sed and awk** have languages that can write files and run commands, so only a conservative subset counts as read-only:
-  - sed: flags `-n -E -r -s -u -z -e -l`; scripts made of addresses, `!`, `{}` and `p P d D n N g G h H x z = q Q l`, or `s///` with flags `g p i I m M N`. No `w`, `W`, `r`, `R`, `e`, `a`/`i`/`c`, `y` or labels, and no `-i`/`-f`.
-  - awk: only `-F` and `-v` options, and no `system`, `getline`, `extension`, `@`, `|` (except `||`) or `>` (except `>=`) anywhere in the program.
-
-  Anything outside the subset needs approval. It is cheaper to spend one model call than to classify a language by substring.
-- **Redirections** may only read (`<`, `<<<`, heredocs), duplicate a descriptor (`2>&1`, `>&2`), or write to `/dev/null`, `/dev/stdout` or `/dev/stderr`. This covers `>`, `>>`, `>|`, `&>`, `N>`, `>&FILE`, `<>` and `>(...)`. Any command substitution makes the line not read-only, and so does process substitution.
-- **Excluded by default:** `sudo`, `less`/`more` (`LESSOPEN`, `-o` log files), `xargs`, `tee`, shells, `eval`, and shell keywords (`for`, `if`, `{ }`, functions). To opt a program in, add it to `extra_readonly_commands` (`TREEJIT_EXTRA_READONLY_COMMANDS=less,xargs`). This trusts the program with any arguments, but the program-path, assignment and redirection rules still apply.
-- **The tokenizer cooks words as bash does.** `$'...'` is decoded in full (`\NNN`, `\xHH`, `\uHHHH`, `\cX`, ...), and `$"..."` cooks like `"..."`, so `$'\147it' push` has the shape `git push`. Leading reserved words (`if`, `then`, `do`, `{`, `!`, `function f`) are skipped when locating the program.
-- **Commit points** (`policy.commit_reason`, which says *why*; `is_commit_point` is `bool` of it) are matched only where a program runs: the program of each simple command after reserved words and wrappers (`env git push`, `timeout 60 git push`, `if git push; then`), the command that `xargs`, `parallel`, `watch`, `strace`, `flock`, `chroot` and similar runners run, `find -exec*`/`-ok*`, and `python -m MODULE`. Nested scripts count too: `$(...)`, backticks, `sh -c`, `eval`, `env -S`, and quoted text when a shell, `watch` or `parallel` in the line may run it (`echo 'git push' | sh`). Quoted text elsewhere is data, so `git commit -m "then git push"` is not a commit point, and `apt install curl`, `mkdir ssh`, `git stash push` are not either. A multi-word pattern (`git push`) is also caught anywhere in a command that isn't read-only, for wrappers we don't model (`mywrap git push`). In a command that isn't read-only, commit points are:
-  - **Configured patterns** (`commit_commands`), matched loosely from the program (`docker compose push`, `npm --registry x publish`). Patterns headed by `git` match from git's subcommand, found by parsing its global options (`git -C repo --no-pager push`).
-  - **Non-literal program or git subcommand**: `$CMD x`, `git $x`, `git "$@"`, `{git,push}`, `git${IFS}push`, `$'\147it' push`. The shell decides what runs, so the policy can't.
-  - **git**: `push`, `send-pack`, `http-push`, `svn`, `p4`, `send-email`, `imap-send`, `cvsexportcommit`; any subcommand that isn't a builtin (an alias can be `!sh -c ...`, an extension is any `git-*` program); `-c KEY=...` / `--config-env` / `--exec-path=` except for harmless keys (`user.*`, `color.*`, `core.pager=cat`, ...); `rebase --exec`, `bisect run`, `submodule foreach`, `filter-branch`, `hook`.
-  - **Opaque executors**, whose effects the call doesn't show: interpreters (`python`, `node`, `perl`, `ruby`, `awk` outside the read-only subset, ...) except `-m` with a local module (`pytest`, `unittest`, `pip`, `mypy`, ...) and `--version`; shells (`bash x.sh`, `bash <<< '...'`, `... | sh`), `source`/`.`; script paths (`./deploy.sh`, `scripts/x.py`, `x.sh`), except tool bins (`.venv/bin/pytest`, `node_modules/.bin/jest`); task runners (`make`, `just`, `rake`, `nox`, `gradle`/`./gradlew`, `mvn`, ...) unless every target is made of local words (`test`, `lint`, `build`, `test:unit`, `typecheck`, ...), with no `VAR=val` override; package scripts and runners (`npm run release`, `yarn release`, `npm start`, `npx vercel`, `uv tool run`, `cargo run`, `go run`/`generate`, `deno run`, `dotnet run`, unknown cargo extensions), with the same local-name exemption and `npx jest`-style exemptions for known local tools; `uv run`/`poetry run`/`bundle exec CMD` classify CMD.
-  - **Remote writers**: `gh` except read verbs (`view`, `list`, `diff`, `checks`, `status`, `download`, `checkout`, `clone`, top-level `search`/`status`/`browse`) and `gh api` GETs (a `-f` field turns it into a POST); `curl`/`wget` except a plain GET/HEAD of loopback URLs with options that send nothing (`curl -sSf http://127.0.0.1:3000/ -o /dev/null`); cloud and cluster CLIs (`kubectl`, `helm`, `terraform`, `aws`, `gcloud`, `az`, `fly`, `heroku`, `vercel`, ...) unless the positional words include a read verb and no write verb (`kubectl get pods`, `aws ec2 describe-instances`); HTTP, mail and socket clients (`http`, `xh`, `sendmail`, `nc`, ...).
-  - **Deliberate exceptions** (still commit points): dry runs (`git push --dry-run`, `npm publish --dry-run`, `kubectl apply --dry-run=client`: we'd have to trust each tool's flag), local `rsync` (telling it from a remote copy means parsing its host syntax), and `npm run <name>` whose name isn't made of local words (`npm run push-docs`). Known-local runners (`pytest`, `tox`, `npm test`, `cargo test`/`build`, `go test`, `make test|lint|build`, `uv run pytest`) are not commit points, though they're not read-only either.
-- **The reason is stored.** The builder stores `commit_reason` per (node, edge) from the edge's reference call. `materialize` re-renders every call it emits and rejects it when the reason differs, so a T3 value can't change a call's commit status or turn one commit into another.
-- **Contested commit points go to the model** (decision 24). A commit point where the model has also chosen something else after the same history (a sibling edge, or ending the episode, at any context of the step) never replays on a majority (T0). A decision-list rule (T1) may pick it only if the rule separated the choices in all the evidence: no example of another choice where its predicate holds (`leak` 0), no excess failed replays, `task_rule_support` supporting examples whatever the predicate, and a task that resembles those examples (the similarity gate of decision 16, applied to observation predicates as well). Otherwise the step goes to a T2 call, which shows the task and the known choices (option 0 is "something else", so a task that wants nothing done gets the model), or to T4 if T2 is off or the known choices cover too little. A commit point the model has only ever chosen after that history still replays with approval plus `promote_runs + 1` passing runs.
-- **`treejit approve EDGE --not-commit`** is the per-edge override for an opaque executor the operator knows is local (`./run_checks.sh`): it approves the edge and drops the `promote_runs + 1` requirement. It is stored per edge (`not_commit` table) and never implied by `approve '*'`, which approves every edge but leaves commit points needing the extra evidence.
-- **Repository config.** git reads (`status`, `diff`, `show`, `blame`, `log -p`) run programs named by the repository's own config and attributes: `core.fsmonitor`, `diff.external`, textconv and clean filters, and those of a bare repository embedded in the tree (`repro/S4_output.txt`). The proxy can't see the disk, so treejit **assumes a trusted checkout**: the repository's config and history come from someone you trust. With `trust_repo_config = false` (`TREEJIT_TRUST_REPO_CONFIG=0`) git reads are not read-only and need approval like any write; everything else is unchanged. Either way, a run is *tainted* once one of its calls changes what git will read (`policy.repo_taint`): it writes `.git/*`, `.gitattributes`, `.gitmodules` or `.gitconfig` (shell or file tools), sets a git config key that isn't known to be harmless, sets `GIT_*` variables, runs `git clone`, `git submodule`, `git init --bare`, or extracts an archive (`tar x`, `unzip`, `7z`, ...). For the rest of a tainted run, replay treats git reads as not read-only: an unapproved `git status` edge goes to the model (reason `repo_tainted`). Also set `safe.bareRepository=explicit` in the global git config of the machine the agent runs on: it stops git from using a bare repository it finds while walking up from the working directory. Rewriting replayed commands with `-c core.fsmonitor=false ...` was considered and rejected: it doesn't cover filters or textconv, and it changes edge shapes.
-
-Decision made while hardening it:
-
-11. **When unsure, say "not read-only".** A false "no" costs one model call, or one approval. A false "yes" runs a write with no model call and nobody watching. Checks therefore accept what they understand rather than rejecting what they recognise as dangerous. The exception is `find`, whose side-effecting actions are a closed, documented set. On the synthetic suite the stricter policy changed nothing: read-only `treejit` mode served 44% of tool calls in tasks 71–120, before and after.
-
-Decisions made while closing the commit-point gaps (S1–S4 in `PLAN.md`):
-
-18. **Unknown effects are a commit.** A call whose effects can't be read off the call (an interpreter, a shell, a script, a task target, a package script, a git alias) is a commit point, not just a write. The cost is one extra passing run before an approved edge replays; the alternative let `./deploy.sh` or `python -c '...git push'` replay after two runs under `approve '*'` (`repro/S1_output.txt`). Operators who know better say so per edge (`--not-commit`). Known-local runners are exempt so that test and build steps, the most common opaque calls, stay ordinary approved writes. The synthetic suite is unchanged task for task (its `python -m pytest` is a local module, and `git add`/`commit`/`rm` are local).
-19. **Match where programs run, not where words appear.** Matching patterns as a subsequence of any command flagged 28 of 51 realistic commands wrongly (`apt install curl`, `git stash push`, `gh pr view`). Patterns now match only at program positions, git's subcommand is found by parsing its global options, and anything the shell decides at run time (a non-literal program or git subcommand) counts as a commit instead. 44 of 51 are now right; the other 7 are the documented exceptions above.
-20. **Taint instead of rewriting.** Git reads trust the repository's config (`trust_repo_config`, default true), but a run that edits git config or metadata loses that trust for its remaining steps. Taint is computed from the run's own calls at decision time (`replay.option`), so it needs no state and never outlives the run.
-
-Decision made after the tau-bench misroutes (B1 in `PLAN.md`):
-
-24. **Only the task can choose between irreversible actions.** On tau-bench, `get_order_details` on a pending order is followed by a cancel in some tasks and a modify in others, and in airline by a cancel or by nothing. The observation is the same; the task says which. A rule like `status == pending → cancel` is right in 4 of 5 examples, which met the purity bar (0.8), and a majority is how T0 works. For reads and ordinary writes that trade is fine: a wrong read costs a model call, and side exits and negatives learn from it. A wrong cancel can't be undone, and the negative arrives only after the damage. So a commit point is replayed without the model only when the evidence shows no alternative: the model never chose anything else after this history (pooled over every context of the step, from the root path to the last edge, so a narrow context that has seen only cancels doesn't hide a general one where modifies happened too), or a rule on the input separated the alternatives perfectly (`features.learn_decision_list` now records each rule's `leak` over every example at the node) with as much support as a task-word rule and on a task like its examples. Every other case gets a T2 call. It shows the task, and the model's pick is a labelled example like any T2 pick. The cost was measured rather than assumed. On tau-bench retail train it is +0.03 small calls per task and no extra full calls, because the T2 call carries the values that a T3 fill used to ask for. On the synthetic suite (seeds 0–5, edges approved) it is +0.02 to +0.06 full calls per task, from the rare `processed → transfer` branch, which no longer replays on 2–4 examples, and 0.4–1.3 points of served share, with success unchanged. Also considered: a higher confidence threshold for commit points. The misrouting rule had confidence 0.70 and a correct cancel rule has about the same, so any threshold that stops one stops the other. Always using T2 for commit points was also considered: it costs a small call even where the model has only ever done one thing.
-
-### Learning from failed replays and from where the model stops
-
-Decisions made after the seed-3 regression (see Results):
-
-12. **Failed replays are evidence against the choice that made them.** A replayed step in a failed run is a *negative* for its edge at the contexts of that step. Negatives lower the edge's purity (T0). They also count as misses for the decision-list rules that predict that edge on that input (T1). A failed run also fails every other replayed step in it, so only the *excess* counts: negatives beyond a failure rate of `1 - purity` among all replays of the same choice, passing ones included (`features.excess_negatives`). Twenty passing replays and one failure change nothing. One failure against two passing replays does.
-13. **Task-word rules must earn T1.** A decision-list rule on a task word replays only once `task_rule_support` (default 5) model-chosen examples support it. Observation rules need 2. Each excess negative adds that many again. Until then the rule's branch goes to a T2 call, or to T4 if T2 is off. The model's pick is a labelled example, so a chance rule is broken by the first input it would have misrouted, while a real one reaches its support within a few tasks. In the seed-3 scenario (`tests/test_learning.py`), the typo task under `src/` gets a T2 call instead of `git rm`, and the rule disappears.
-14. **A minority choice blocks T0 until it is outnumbered 8 to 1.** When the model has chosen more than one child at a node, the leading child's share gets one pseudo-count against it. So 4 choices against 1 (80%) is not enough to replay without looking at the input, and 8 against 1 is. Without this, seed 3 replayed `git rm pyproject.toml` into a version bump at task 8.
-15. **The model's decision to stop is a choice too.** When a forwarded response has no tool call (and did not stop for `max_tokens`/`length`), `complete()` records `runs.ended_after`. For passing runs, the builder adds an END choice at the contexts after the last step. END counts toward the node's evidence (`nodes.n_end`, included in `n_pass`) and can be a decision-list label. When END leads at the deciding context, the request goes straight to T4 with reason `end@…`, with no subcall and no replay. END is never replayed: the final answer always comes from the model. A starved specific context that has only seen END also vetoes a back-off proposal. In the synthetic suite, 192 of 200 final answers at seed 0 are recognised as END. The suite had no end-of-task subcall to save: no failed subcall there was followed by the final answer, before or after this change, and small calls per task are unchanged. The waste shows up when an n-gram context has a child after the last step, as in `test_t2_resolves_ambiguous_node` (3 small calls → 2) and `test_final_answer_is_recorded_as_end_and_not_proposed_again`, where it also prevents a wrong T0 replay.
-16. **A task-word rule is trusted only on tasks like those that support it.** Support alone can be reached by chance: at seed 3 the first 5 delete tasks all named `src/` paths and no typo task had yet, so `task~src → git rm` was proven when the first `src/` typo task arrived. Each task-word rule now stores the task-word sets of its supporting examples (distinct, the most recent 40). T1 replays on it only if the task's best Jaccard similarity to one of them is at least `task_rule_similarity` (default 0.5; 0 turns the gate off). Otherwise the step goes to T2 with reason `unproven_rule`, and the model's pick becomes an example, so each new kind of task costs one small call, once. The stored sets keep only the words that at least two supporting examples share, while the task keeps all of its own. A word seen in one example only (a file name, a typo word, a version) says nothing about the kind of task, and with those words kept, every typo task with a new typo looked new: in read-only mode that cost 0.033 extra small calls per task instead of 0.023. Cutting the task's words the same way made the gate too lenient, and it missed seed 3 task 13, since the words that mark a new kind of task (`correct`, `ship`) are exactly the ones no example has. Observation predicates (`err==false`, `json.status=="pending"`, `obs~line`) get no such gate: they test the state the choice depends on, and similarity over the rest of an observation (file contents, order details) would call almost every input new. Over seeds 0–5 with edges approved, observation rules made 1,257 T1 replays (1,076 on features, 181 on `obs~line`), and none of them was in a failed run.
-17. **Failures count per kind of task, not per rule.** A task-word rule also stores the task-word sets of the inputs it replayed into failed runs (`nx`, leaving out any set that also supports it, since the same words then both passed and failed). T1 needs the task to be more similar to a supporting example than to any of them. Before, the negatives of decision 12 were pooled per rule: after N passing replays on one kind of task, a second kind that shares the rule's word needed about N/4 failed runs before the excess showed, and the demotion then also sent the first kind to T2. Now, with N = 20, the second kind fails once and the first kind keeps T1 (`test_failures_count_per_input_class_not_per_rule`; it failed 6 times before). The pooled excess still applies, for failures that task words can't separate. `excess_negatives` also no longer returns float residue (`1 − 0.2·5` was 2.2e-16, not 0).
+- **T3 (fill).** T0/T1 picked an edge that may replay, but some variables have no rule, or their rule abstains for this input. The subcall shows the task, the calls so far (arguments truncated to 200 chars), the last 3 tool results (2,000 chars each), and the next call with `<placeholders>`. The model answers one string per hole, or `not_this_step`. Values are spliced in as data (one quoted shell word), then the call is re-rendered and re-checked: a read-only call must stay read-only, its commit reason must equal the one stored for the edge (so `sh -c 'echo a'` can't become `sh -c 'git push'`, nor `make test` become `make deploy`), and it must keep the edge's shape.
+- **T2 (choose).** Used at an ambiguous node (at least 2 children the model has chosen, the replayable ones at least 50% of those choices), at a contested commit point (decision 21), for an unproven task-word rule (decision 15), and as a *checkpoint* when the confidence budget runs out on an otherwise confident step. The model answers an option number, or 0 for "something else" (→ T4). If the chosen option has holes, the same call asks for their values. A T2 step restarts the confidence budget; the hard cap K still counts it.
+- **Wire shape.** Anthropic: structured outputs (`output_config.format`, a JSON schema with `additionalProperties: false` and `enum`s); the answer is a JSON text block, parsed tolerantly (thinking blocks, code fences, stray prose), and anything that doesn't fit the schema falls back to T4. `thinking` is never sent. `output_config.effort` is `subcall_effort` on models that take it; where thinking is on by default, `max_tokens` is at least 4096. `subcall_format = "tool_auto"` sends one `strict` tool with `tool_choice: auto` instead (no call → T4); a forced tool is used only for legacy `claude-3*`/`claude-2*` models. OpenAI Chat Completions and Responses use a forced function call.
+- Subcalls use `small_model` if set (else the request's model). They are logged in `requests` with tier `T2` / `T3` and their own usage, and they carry the run id. Subcall steps are marked in the call id (`..._t3`, `..._t2`, `..._ck`), so recognition, side exits and the budget stay stateless.
 
 ### Runs and episodes
 
-An **episode** is one task: every turn of a conversation since the last task boundary (`dialects.episode_of`, the same rules for Anthropic and OpenAI chat). The task is the episode's first user text. A later user turn either continues the episode or starts a new one:
+An **episode** is one task: every turn of a conversation since the last task boundary (`dialects.episode_of`, the same rules for every dialect). The task is the episode's first user text. A later user turn either continues the episode or starts a new one:
 
-- **Continues, as a `steer` step**, when the user cut in while the agent was working: text next to tool results, an interrupt (`[Request interrupted by user…]`, the marker itself dropped), or a user message with no finished agent turn since the previous one.
-- **Continues, as a `yes` / `no` / `text` step**, when the agent's turn ended by asking something: a question that isn't a generic closer ("anything else?") or a confirmation prompt (`(yes/no)`, "shall I", "do you want", "confirm"). `yes` and `no` are bare confirmations and refusals ("Yes, please proceed with the cancellation." is `yes`; "yes, but only #W2" is `text`). A bare "ok" or "no thanks" after a turn that asked nothing also continues, as `text`.
-- **Starts a new episode** otherwise: a new request after the agent finished without asking. Claude Code's pattern, one conversation with several prompts, is several episodes. Consecutive user messages count as one turn, and Claude Code's local slash-command transcripts (`<command-name>`, `<local-command-stdout>`) are dropped from the text.
+- **Continues, as a `steer` step**, when the user cut in while the agent was working: text next to tool results, an interrupt (`[Request interrupted by user…]`), or a user message with no finished agent turn since the previous one.
+- **Continues, as a `yes` / `no` / `text` step**, when the agent's turn ended by asking something (a question that isn't a generic closer, or a confirmation prompt). A bare "ok" or "no thanks" after a turn that asked nothing also continues, as `text`.
+- **Starts a new episode** otherwise. Claude Code's pattern, one conversation with several prompts, is several episodes. Claude Code's local slash-command transcripts are dropped from the text.
 
-`episode_mode` (config) or the `X-TreeJIT-Episode` request header overrides this: `conversation` makes the whole conversation one episode (tau-bench: one task, many user turns), `turn` makes every user message a new one (the behaviour before multi-turn episodes).
+`episode_mode` (config) or the `X-TreeJIT-Episode` header overrides this: `conversation` makes the whole conversation one episode (tau-bench), `turn` makes every user message a new one.
 
-A **user step** is a pseudo-call `$user:<kind>` whose observation is the user's text. Recognition gives it an edge like any call, so "after the user said yes" is a context, and the step after it is learned there. Bindings (`$obs[-1]`, an email the user typed) and features read it like any observation. The builder never makes it a choice: no user edge is ever replayable, so replay never produces a user turn. When the user answers a finished agent turn (`yes`/`no`/`text`), the agent's text reply before it is END evidence at that context: the model chose to stop and ask there, so that request goes to the model, as the final answer does. `yes` and `no` are different edges, so a write learned after "yes" is never proposed after "no". A T0 write after a `yes` still needs approval like any write, and a commit point also needs `promote_runs + 1` passing runs (`tests/test_episodes.py` replays `cancel_pending_order` after "yes" under `approve '*'`).
+A **user step** is a pseudo-call `$user:<kind>` whose observation is the user's text. It gets an edge like any call, so "after the user said yes" is a context; bindings and features read it like any observation. No user edge is ever replayable. When the user answers a finished agent turn, the agent's text reply before it is END evidence at that context. `yes` and `no` are different edges, so a write learned after "yes" is never proposed after "no".
 
 A **run** is one episode of one conversation. Its id is, in priority order:
 
 1. `X-TreeJIT-Run: H`: `H`, or `H.<task hash>` for another task under the same header.
-2. A harness session id: Claude Code's `metadata.user_id` (`…_session_<uuid>`, or a JSON object with `session_id`; parsed defensively), the `X-Claude-Code-Session-Id` header, or OpenAI's `prompt_cache_key`. The id is `r_` + hash(family, session, first user text, episode index, task hash), known from the episode's first request.
-3. Otherwise hash(family, first user text of the conversation, the conversation's first assistant turn, episode index, task hash). The first assistant turn is its tool-call ids, or its text when it made no call. Weak ids (`call_0`, `toolu_01`, short or counter-like, `model.weak_call_id`) are salted with the first observation. So a conversation's first request gets its run id when its response arrives, or, with weak ids, one request later, when treejit fills in the rows that waited. OpenAI's `user` is mixed in but never names a run alone: it identifies a person, not a conversation.
+2. A harness session id: Claude Code's `metadata.user_id` (`…_session_<uuid>`, or a JSON object with `session_id`), the `X-Claude-Code-Session-Id` header, or OpenAI's `prompt_cache_key`. The id is `r_` + hash(family, session, first user text, episode index, task hash).
+3. Otherwise hash(family, first user text, the conversation's first assistant turn, episode index, task hash). Weak call ids (`call_0`, `toolu_01`, counter-like) are salted with the first observation, so such a conversation's first request gets its run id one request later. OpenAI's `user` is mixed in but never names a run alone.
 
-Two rules keep conversations from merging. A run whose recorded steps the conversation doesn't continue (different call ids at its first or last step, or more steps than the request has) is someone else's, so the next id is tried (`<id>.2`, `.3`, …). And **a run with an outcome is never extended.** A conversation that goes on after its outcome (a Stop hook reported after the agent asked a question, then the user said "yes") continues in a fork `<id>.2`. The fork holds the whole episode, but the steps it copied (`runs.inherited`) are context only: they were counted in the run they came from. An outcome posted for `H` also reaches its forks that have none yet.
-
-Decisions made while adding them (T2, M1 and E4 in `PLAN.md`):
-
-21. **User turns are context, never choices.** Making the user's reply an edge lets the tree condition on it with the machinery it already has (root paths, n-grams, guards, bindings). Keeping it out of the choices keeps replay from speaking for the user, and turns the question before it into the END evidence it is.
-22. **The boundary is decided by the agent's last turn, not by the user's words.** Whether the agent asked something is visible, and it is what makes a reply a reply. Short-reply heuristics alone would have merged "now write tests" into the previous task, and a question heuristic alone would have split "yes" after "I can also commit this." The heuristic is stateless (every request re-parses the whole history the same way), and the header or `episode_mode` overrides it where the harness knows better.
-23. **Identify the conversation, then the task in it.** The first call id alone merged conversations whose backend numbers calls (`repro/T2_out.txt`: three conversations and a later `rm -rf build` in one run marked pass). Session id or first turn, then episode index, then task hash, with the continuation check and forks as a backstop, keeps each id stable across the requests of one episode and distinct across conversations.
+A run whose recorded steps the conversation doesn't continue is someone else's, so the next id is tried (`<id>.2`, …). **A run with an outcome is never extended:** a conversation that goes on after its outcome continues in a fork `<id>.2`, whose copied steps (`runs.inherited`) are context only. An outcome posted for `H` also reaches its forks that have none yet.
 
 ### Frontier prefix compaction (opt-in)
 
-With `compact = true` (`TREEJIT_COMPACT=1`), a request that goes to the model (T4) is forwarded with the raw observations of *verified replayed steps* replaced by a short deterministic digest. Only the forwarded copy changes. The harness's own history, and the trace treejit records, keep the full text. The code is in `compaction.py`, called from the forward path of `engine.handle`.
+With `compact = true`, a request that goes to the model (T4) is forwarded with the raw observations of *verified replayed steps* replaced by a short deterministic digest. Only the forwarded copy changes; the harness's history and treejit's trace keep the full text.
 
 ```
 [treejit: replayed & verified step — Bash(python -m pytest -q) → ok, 21 lines, 1001 chars; first line: "…… [ 34%]"; last line: "233 passed, 5 warnings in 6.93s"]
 [output elided by treejit; call the tool again if you need it]
 ```
 
-For a JSON observation, the digest shows the top-level keys with small scalar values instead of a first line, for example `json {"order_id": "#W1", "status": "pending", "items": [3]}`.
-
 Rules:
 
-1. **Eligible.** A step is eligible only if all of these hold:
-   - its call id carries the replay marker;
-   - its edge is known at the node encoded in the id;
-   - its observation satisfies that edge's (non-empty) learned postcondition;
-   - its features show no error.
+1. **Eligible** only if the call id carries the replay marker, the edge is known at the node encoded in the id, the observation satisfies the edge's (non-empty) learned postcondition, and its features show no error. Model-chosen, side-exited and errored steps are always sent in full.
+2. **Keep the last few.** The last `compact_keep_last` (3) observations go in full; observations under `compact_min_chars` (400) are left alone.
+3. **Keep what the next decision reads**: an observation read by a binding, guard or decision list of any child of a current frontier context. (The older "keep what an earlier step's bindings read" rule protected nothing and is off; `compact_keep_path = true` restores it.)
+4. **Append-only (`compact_mode = "first_sight"`, the default).** A step may be compacted only in the *first* forwarded request that contains it; once sent in full it stays full, and once compacted it stays compacted, across rebuilds and restarts (decisions are stored in `compactions`, or reconstructed from the conversation when missing). Consecutive forwards of one conversation are byte-identical up to the previous request's last message, so the provider's prompt cache keeps the whole prefix. In practice this compacts *bursts*: more than `compact_keep_last` steps replayed between two frontier calls.
+5. **`compact_mode = "epoch"`** additionally re-compacts the whole prefix when the conversation's previous forward is older than `compact_epoch_ttl` (the cache went cold). **`"window"`** (legacy) moves the keep-last window on every request; it sends the fewest raw tokens but changes an earlier message on every forward, so it only suits providers without prompt caching. Neither is compatible with preserved thinking (see [Compatibility](#compatibility-with-current-claude-models)).
 
-   Model-chosen, side-exited and errored steps are always sent in full.
-2. **Keep the last few.** The last `compact_keep_last` (default 3) observations of a request are sent in full. Observations under `compact_min_chars` (default 400) are left alone.
-3. **Keep what the next decision reads.** An observation is kept when a binding rule (`["x", ["obs", k], …]`, including those nested in `fmt`, and `case`), a guard, or a decision list of any child of any current frontier context (root path and n-gram) reads it. Binding rules reach back at most 3 observations, so this only matters when `compact_keep_last` is below 3. The older "path" rule (keep what an earlier step's bindings read) is off by default, `compact_keep_path = true` restores it: decisions are made on the harness's uncompacted body, so it protected nothing, and dropping it changed no trajectory on seeds 0–5 (PLAN C2).
-4. **Append-only (`compact_mode = "first_sight"`, the default).** A step may be compacted only in the *first* forwarded request that contains it. Once it went upstream in full it stays full, and once compacted it stays compacted, even after a tree rebuild or a restart. Consecutive forwards of one conversation are therefore byte-identical up to the previous request's last message (`fwd[i].messages[:len(fwd[i-1].messages)-1] == fwd[i-1].messages[:-1]`), and the provider's prompt cache keeps the whole prefix. In practice this compacts the steps of a *burst*: more than `compact_keep_last` steps replayed between two frontier calls, which is how treejit is used once edges are approved.
-   - Every decision is stored in `compactions`, keyed by call id and observation hash; a NULL digest means "sent in full". Digests are pure functions of the call and its observation (sorted-key labels, source-order JSON keys, no time or random ids).
-   - Without a row (pruned, another instance, compaction just switched on) the decision is reconstructed from the conversation: the first forward that contained step *i* is the request just before the first model-chosen step after *i* (or the current one), and step *i* was in its keep-last window iff *i* ≥ *f* − `compact_keep_last`.
-   - Steps of earlier episodes of the same conversation (before the last user text message) keep their stored digests.
-5. **Epoch re-compaction (`compact_mode = "epoch"`, opt-in).** As first-sight, but when the previous forward of this conversation is older than `compact_epoch_ttl` (default 300 s, the 5-minute cache TTL; set 3600 for the 1-hour TTL), the cache entry has expired and the next request rewrites the whole prefix anyway. That request is compacted like `window` below, and the result becomes the new sticky state. A conversation is identified by its first tool call id, and its last forward time is kept in `compact_convs`.
-6. **`compact_mode = "window"`** is the behaviour before this fix: the keep-last window moves on every request and the step that leaves it is compacted. It sends the fewest raw tokens, but it changes an earlier message on every forward, so it only suits providers without prompt caching.
+Each forwarded request records `compacted N obs/C chars` in its note. `treejit prune` also drops the decisions of runs idle longer than `compact_retention_days` (`--compact-days`), and the forward path does so at most once an hour; a pruned conversation that comes back gets the same bytes, because decisions are reconstructed.
 
-Each forwarded request records `compacted N obs/C chars` (plus `(epoch)` for an epoch re-compaction) in its note and the characters saved in `requests.compacted_chars`. `treejit prune` also drops the decisions of runs idle longer than `compact_retention_days` (default 7; `--compact-days N`, 0 keeps them), and the forward path does the same at most once an hour. A pruned conversation that comes back is forwarded with the same bytes, because the decisions are reconstructed.
-
-**Why first-sight, and the prompt cache.** Before this fix the README claimed the cache survived compaction. It didn't: in the moving window, the step that leaves the window changes from full to compacted in every request, so the previous request's cache entry never matches past that step. `tests/cache_model.py` bills request sequences the way the Anthropic prompt cache does (reads 0.1×, writes 1.25×, a breakpoint after `system` and one at the end of the conversation, 5-minute TTL), driving the real engine. The output is in `repro/C1_after_small.txt` and `repro/C1_after_bigsys.txt` (the latter with a 62.5k-character, Claude Code-sized system prompt). Billed input tokens against compaction off:
+**Compaction and the prompt cache.** `tests/cache_model.py` bills request sequences the way the Anthropic prompt cache does (reads 0.1×, writes 1.25×, a breakpoint after `system` and one at the end, 5-minute TTL), driving the real engine. Billed input tokens against compaction off (`PYTHONPATH=src:bench/src python3 repro/C1_after.py`, output in `repro/C1_after_small.txt`):
 
 | pattern (15 steps, ~3.3k-char observations) | window | first_sight | epoch |
 |---|---|---|---|
-| dense: forwarded after every replayed step | +119% (+43% big system) | ±0 | ±0 |
+| dense: forwarded after every replayed step | +119% (+43% with a 62.5k-char system prompt) | ±0 | ±0 |
 | interleaved: every other step is the model's | +76% (+20%) | ±0 | ±0 |
 | bursty: 4 replayed steps between frontier calls | +9% (+3%) | **−20%** (−8%) | −20% (−8%) |
-| interleaved, a 10-minute pause before forward 7 | +15% | ±0 | **−27%** |
-| bursty, a 10-minute pause before forward 3 | −28% | −20% | **−45%** |
+| interleaved, a 10-minute pause before forward 6 | +15% | ±0 | **−27%** |
+| bursty, a 10-minute pause before forward 2 | −28% | −20% | **−45%** |
 
-First-sight never bills more than compaction off: the bodies are the same sequence with some observations shorter, and every prefix is preserved. `tests/test_compaction.py` checks this for all three patterns and both breakpoint placements, and checks the append-only invariant over consecutive forwards. Chunking the window (advancing it every 3 or 5 steps) still cost +33% / +10% on the dense pattern in the original repro (`repro/C1_out_small.txt`), so it was not kept.
+First-sight never bills more than compaction off: the bodies are the same sequence with some observations shorter, and every prefix is preserved. `tests/test_compaction.py` checks this for all patterns and both breakpoint placements. On the synthetic suite with edges approved (`repro/C1_bench_billed.py --seed S`, each task's full calls billed as one conversation), first-sight bills −11.8% to −14.3% against compaction off on seeds 0–5, and window −10.9% to −13.1%; with a Claude Code-sized system prompt (`--bigsys`) both save under 1%. Trajectories are identical in all three modes.
 
-On the simulated bench (`repro/C1_bench_billed.py`: each task's full calls billed as one conversation, subcalls left out), the edges-approved traffic is bursty, and first-sight is also the cheapest mode:
+**Frontier hints** (`hints = "failures"`: on a T4 call at a node with tombstoned or failing children, a short note of what failed and what worked there) are sticky: each is stored under an anchor (a chained hash of the system prompt, tool names and the history up to the item it follows) and re-inserted, byte-identical, at the same position in every later forward. Consecutive forwards are append-only with hints on (`tests/test_hints.py`), and a hint costs at most its own tokens in the cache model.
 
-| seed | billed / task: off | first_sight | window | compacted chars / task (first_sight / window) |
-|---|---|---|---|---|
-| 0 | 1,574 | 1,367 (−13.1%) | 1,391 (−11.6%) | 611 / 687 |
-| 1 | 1,557 | 1,360 (−12.6%) | 1,385 (−11.0%) | 584 / 665 |
-| 2 | 1,528 | 1,316 (−13.9%) | 1,331 (−12.9%) | 601 / 674 |
-| 3 | 1,555 | 1,351 (−13.1%) | 1,362 (−12.4%) | 595 / 627 |
-| 4 | 1,577 | 1,382 (−12.4%) | 1,413 (−10.4%) | 575 / 680 |
-| 5 | 1,591 | 1,366 (−14.2%) | 1,394 (−12.4%) | 655 / 740 |
+## Replay safety
 
-With a Claude Code-sized system prompt (`--bigsys`, 62.5k chars, written once per task) the savings shrink to −0.8% to −1.0% for first-sight and −0.7% to −0.9% for window. Trajectories are identical in all three modes.
+Replay emits a call with no model call and no human in the loop only if `policy.is_readonly` says it is read-only. Otherwise the edge needs operator approval (`treejit approve`). A commit point (`policy.commit_reason` is non-empty: `git push`, `curl`, `send_*`, an interpreter, a script, ...) needs approval **and** `promote_runs + 1` passing runs, and a contested one goes to the model (below). For shell commands:
 
-**What else breaks the prefix** (measured with the same model, `repro/C1_after_*.txt`, last table):
-
-- **Frontier hints (fixed: sticky hints, PLAN H1).** A hint used to be appended to the last message of one forwarded request only; the next request lacked it, so with top-level *automatic* caching no hinted request's cache entry was ever read again (+156% to +247% billed with `hints = always`). Hints are now part of the forwarded conversation from the moment they are given: each is stored under an anchor (a chained hash of the system prompt, tool names and the history up to the item it follows) and re-inserted, byte-identical, at the same position in every later forward. Consecutive forwards are append-only with hints on (`tests/test_hints.py`), and the cost model now bills `hints = always` at +1.1% to +6.1% over no hints, under both breakpoint placements, which is at most the hint blocks' own tokens. The first hint given at a position wins, so a retried request or another conversation with the very same prefix gets the same hint. Hints unused for `compact_retention_days` are pruned.
-- **The thinking drop.** `prepare_forward` removes `thinking` once the episode has a replayed step, on models where leaving it out turns thinking off. Toggling thinking invalidates the messages cache, but it happens at most twice per episode, and the prefix it invalidates is usually short: +0.1% in the model. On models that think by default (Fable, Mythos, Opus 5 / 5.5, Sonnet 5), the drop would disable nothing, so it is skipped.
-
-**Results.** Averaged over all 200 tasks in `treejit+ok+compact` (first_sight) vs `treejit+ok`:
-
-| seed | tokens / task (compaction off) | tokens / task (compaction on) | change | compacted chars / task | success (off → on) |
-|---|---|---|---|---|---|
-| 0 | 2,113 | 1,948 | −7.8% | 611 | 200 → 200 |
-| 1 | 1,892 | 1,733 | −8.4% | 584 | 200 → 200 |
-| 2 | 2,229 | 2,061 | −7.5% | 601 | 200 → 200 |
-| 3 | 2,369 | 2,208 | −6.8% | 595 | 199 → 199 |
-| 4 | 2,323 | 2,167 | −6.7% | 575 | 199 → 199 |
-| 5 | 1,877 | 1,699 | −9.5% | 655 | 200 → 200 |
-
-- Trajectories (success, calls, tiers) are identical, task for task, with compaction on and off.
-- Compared with the moving window with the path rule (the previous default: 230–674 chars/task, −3.2% to −8.5%), first-sight without the path rule compacts more, not less: dropping rule 3b more than makes up for keeping steps that were first sent inside the window.
-- Retail is unaffected: its observations are under 400 characters.
-- Compaction only acts on frontier calls. With edges approved there are few of them, often just the final answer.
+- **One view of the program.** `shellwords.unwrap` skips `VAR=val` assignments and transparent wrappers with their own options (`env`, `sudo`, `time`, `nohup`, `exec`, `command`, `nice`, `timeout N`, `stdbuf`). Edge shapes, the read-only check and commit-point detection all use it, so `env git push origin main` has the shape `git push` and is a commit point. An unrecognised wrapper option makes the command not read-only; `sudo` never counts as read-only.
+- **Allowlist, not denylist.** Every simple command must run an allowlisted program (`ls`, `cat`, `grep`, `head`, `wc`, `jq`, `diff`, ...), named literally (no `$VAR`, globs, brace expansion or `$'\…'`), as a bare name or from a standard bin directory. Assignments are limited to harmless variables (`LC_*`, `LANG`, `TZ`, `NO_COLOR`, `PAGER=cat`, ...), which keeps out `LD_PRELOAD`, `PATH`, `GIT_EXTERNAL_DIFF`.
+- **Per-program argument checks** accept only options they know, with literal arguments. They keep out `sort -o`, `uniq IN OUT`, `date -s`, `tree -o`, `yq -i`, `fd -x`, `rg --pre`, `bat --pager`, `find -exec*`/`-delete`/`-fprint*`, and so on. `git` global options are limited (no `-c`, `--config-env`, `--exec-path`); the subcommand must be a read with no `--output`; `branch`/`tag` only when listing, `config` only when reading, `remote` only bare or `show`/`get-url`, `stash` only `list`/`show`.
+- **sed and awk**: only a conservative subset is read-only (sed without `w W r R e a i c y`, labels, `-i`, `-f`; awk with only `-F`/`-v` and no `system`, `getline`, pipes or output redirection). Anything else needs approval.
+- **Redirections** may only read, duplicate a descriptor, or write to `/dev/null`, `/dev/stdout`, `/dev/stderr`. Command and process substitution make a line not read-only.
+- **Excluded by default:** `sudo`, `less`/`more`, `xargs`, `tee`, shells, `eval`, shell keywords. `extra_readonly_commands` opts a program in (with any arguments; the path, assignment and redirection rules still apply).
+- **The tokenizer cooks words as bash does.** `$'...'` is decoded in full and `$"..."` cooks like `"..."`, so `$'\147it' push` has the shape `git push`. Leading reserved words are skipped when locating the program.
+- **Commit points** are matched only where a program runs: each simple command's program (after reserved words and wrappers), the command that `xargs`, `parallel`, `watch`, `strace`, `flock`, ... run, `find -exec*`, `python -m MODULE`, and nested scripts (`$(...)`, backticks, `sh -c`, `eval`, `env -S`, quoted text a shell in the line may run). Quoted text elsewhere is data (`git commit -m "then git push"` is not a commit point; `apt install curl`, `git stash push` aren't either). In a command that isn't read-only, commit points are:
+  - **configured patterns** (`commit_commands`), matched from the program; git patterns from git's subcommand, found by parsing its global options (`git -C repo --no-pager push`);
+  - a **non-literal program or git subcommand** (`$CMD x`, `git $x`, `{git,push}`, `git${IFS}push`);
+  - **git** `push`, `send-pack`, `http-push`, `svn`, `p4`, `send-email`, ...; any non-builtin subcommand (aliases, `git-*` extensions); `-c`/`--config-env`/`--exec-path` except harmless keys; `rebase --exec`, `bisect run`, `submodule foreach`, `filter-branch`, `hook`;
+  - **opaque executors**: interpreters (except `-m` with a local module such as `pytest`, and `--version`), shells and `source`, script paths (except tool bins such as `.venv/bin/pytest`), task runners and package scripts (`make`, `just`, `gradle`, `npm run`, `npx`, `cargo run`, `go run`, ...) unless every target is a local word (`test`, `lint`, `build`, ...); `uv run`/`poetry run`/`bundle exec CMD` classify CMD;
+  - **remote writers**: `gh` except read verbs and `gh api` GETs; `curl`/`wget` except a plain GET/HEAD of a loopback URL; cloud and cluster CLIs unless a read verb and no write verb (`kubectl get pods`); HTTP, mail and socket clients.
+  - **Deliberate exceptions** (still commit points): dry runs, local `rsync`, `npm run <name>` with a non-local name. Known-local runners (`pytest`, `tox`, `npm test`, `cargo test`/`build`, `go test`, `make test|lint|build`) are not commit points, though not read-only either.
+- **The reason is stored.** The builder stores `commit_reason` per (node, edge); `materialize` re-renders every call it emits and rejects it when the reason differs, so a T3 value can't change a call's commit status.
+- **Contested commit points go to the model** (decision 21). A commit point where the model has also chosen something else after the same history (a sibling edge, or ending the episode, at any context of the step) never replays on a majority (T0). A decision-list rule (T1) may pick it only if the rule separated the choices in all the evidence (`leak` 0), has no excess failed replays, has `task_rule_support` supporting examples, and the task resembles those examples. Otherwise the step goes to T2, which shows the task and the known choices (option 0 is "something else"), or to T4.
+- **`treejit approve EDGE --not-commit`** declares an opaque edge the operator knows is local (`./run_checks.sh`): it approves the edge and drops the extra-run requirement. It is per edge and never implied by `approve '*'`.
+- **Repository config.** git reads (`status`, `diff`, `show`, `blame`, `log -p`) run programs named by the repository's config and attributes (`core.fsmonitor`, `diff.external`, textconv and clean filters, an embedded bare repository; `repro/S4_output.txt`). The proxy can't see the disk, so treejit **assumes a trusted checkout**. With `trust_repo_config = false`, git reads need approval like any write. Either way, a run is *tainted* once a call writes `.git/*`, `.gitattributes`, `.gitmodules` or `.gitconfig`, sets a git config key not known to be harmless, sets `GIT_*` variables, runs `git clone`/`submodule`/`init --bare`, or extracts an archive; for the rest of that run git reads are not read-only (reason `repo_tainted`). Also set `safe.bareRepository=explicit` in the agent machine's global git config.
 
 ## Compatibility with current Claude models
 
-Claude Fable 5.1, Mythos 5.1 and Opus 5.5 changed three things treejit depends on. Status of each, and how it was checked:
+Claude Fable 5.1, Mythos 5.1 and Opus 5.5 changed three things treejit depends on, and left one question open (PLAN X1, X2). Nothing in this table has been run against the real API.
 
-| Change | What treejit does | Verified |
+| Change | What treejit does | Verified against |
 |---|---|---|
-| **Forced tool use is a 400** (`tool_choice` `tool`/`any`: "not supported for this model") | T2/T3 subcalls use structured outputs (`output_config.format`) and never send `tool_choice` or `thinking`; effort `low` where the model takes it (Opus 5.5's default is `medium`). PLAN X1. | Offline: request shapes per model (`tests/test_subcalls_compat.py`), T2/T3 end to end against a fake always-thinking model that 400s on a forced `tool_choice`. Not yet against the real API. |
-| **Preserved thinking**: a thinking block is bound to the exact prefix that produced it; accounts created on or after 2026-08-31 get a 400 when an earlier part of the history changes (older accounts opt in with `thinking.block_binding.prefix_mismatch_behavior`) | Everything treejit changes in a forwarded body is append-only: sticky hints (above), first-sight compaction. `compact_mode = "window"` and `"epoch"` are **incompatible** with the check: both rewrite tool results that earlier forwards sent in full (epoch does it when the cache is cold, but the thinking blocks after them are still invalidated). Use the default `first_sight` with these models. PLAN X2. | Offline: consecutive forwards are byte-identical up to the previous request, hints included (`tests/test_hints.py`, `tests/test_compaction.py`). |
-| **Thinking can't be disabled** (`{"type": "disabled"}` is a 400; leaving `thinking` out means adaptive) | The "drop `thinking` after replayed turns" fallback is skipped on models that think by default, so the body is forwarded as the harness sent it. | Unit tests only. |
-| **Open question**: does the API accept treejit's replayed assistant turns (tool calls without thinking blocks) inside a tool loop whose other turns carry signed thinking blocks? | Nothing yet: if it doesn't, replay on these models needs a different shape. | **Unverified.** `repro/X2_live_check.py` answers it: with `ANTHROPIC_API_KEY` (or an `ant auth login` profile) it runs a direct probe (a real turn, a replay-shaped turn without thinking, another real turn) and a short session through the proxy with a pre-trained tree, `prefix_mismatch_behavior: "error"` and the `thinking-binding-controls-2026-08-01` beta, and prints every 400 and `input_transformations`. Without credentials it prints SKIP; `--offline` checks its plumbing against a stand-in. |
+| **Forced tool use is a 400** (`tool_choice` `tool`/`any`: "not supported for this model") | T2/T3 subcalls use structured outputs (`output_config.format`) and never send `tool_choice` or `thinking`; effort `low` where the model takes it. | Documentation, plus fakes: request shapes per model (`tests/test_subcalls_compat.py`), T2/T3 end to end against a fake always-thinking model that 400s on a forced `tool_choice`. |
+| **Preserved thinking**: a thinking block is bound to the exact prefix that produced it; accounts created on or after 2026-08-31 get a 400 when an earlier part of the history changes | Everything treejit changes in a forwarded body is append-only: sticky hints and first-sight compaction. `compact_mode = "window"` and `"epoch"` are **incompatible** with the check (both rewrite tool results earlier forwards sent in full). | Documentation, plus unit tests that consecutive forwards are byte-identical up to the previous request, hints included (`tests/test_hints.py`, `tests/test_compaction.py`). |
+| **Thinking can't be disabled** (`{"type": "disabled"}` is a 400; leaving `thinking` out means adaptive) | The "drop `thinking` after replayed turns" fallback is skipped on models that think by default; the body is forwarded as the harness sent it. | Documentation and unit tests. |
+| **Open question**: does the API accept treejit's replayed assistant turns (tool calls without thinking blocks) inside a tool loop whose other turns carry signed thinking blocks? | Nothing yet; if it doesn't, replay on these models needs a different shape. | **Unverified.** |
+
+`repro/X2_live_check.py` settles all four once credentials exist (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or an `ant auth login` profile). It runs (A) a direct probe: a real turn, a replay-shaped turn without thinking, another real turn; and (B) a short session through the proxy with a pre-trained tree and `hints = "always"`, with `thinking.block_binding.prefix_mismatch_behavior: "error"` and the `thinking-binding-controls-2026-08-01` beta, and prints every 400 and `input_transformations`. Without credentials it prints SKIP; `--offline` checks its plumbing against a scripted stand-in.
+
+## Decisions
+
+The original design didn't specify these. Each came from a failure seen in the benchmarks. PLAN issue IDs are given where one applies.
+
+**Learning**
+
+1. **What the model would choose is learned only from steps the model chose.** Replayed steps count toward success and failure, but not toward branch purity or decision lists; otherwise replay reinforces its own guesses.
+2. **Side exits teach.** A replayed step that breaks its postcondition is a miss against the context that chose it. If the model recovers and the run passes, the model's choice is the correct label there (DAgger-style).
+3. **Back-off needs agreement.** When the root path has too little evidence, a less specific macro context may decide, but only if it proposes something the more specific contexts have seen the model do.
+4. **Decision lists have no catch-all default.** An input no rule fires on goes to the model. Rules are penalized for firing on other labels' examples.
+5. **Bindings may abstain.** A rule that is never wrong and correct on a clear majority is kept; where it can't produce a value, the step goes to the model (or T3).
+6. **Stateless replay bookkeeping.** Replayed tool-call ids encode the deciding node and its confidence (`toolu_tj_<node>_<conf><rand>`), so side exits and the confidence budget need no session state.
+7. **Extended thinking.** Replayed assistant turns carry no signed thinking blocks, so on models where leaving `thinking` out turns it off, a frontier call after replayed turns is sent without `thinking`. On models that think by default the body is sent as is.
+
+**T2 and T3**
+
+8. **A T2 pick is a model choice.** It is logged as not replayed and feeds purity and decision lists, so T1 can learn the branch and stop asking. Checkpoints and T3 steps are logged as replayed, since the tree proposed their structure.
+9. **Value back-off.** Once T3 serves a hole at a general (n-gram) context, the specific contexts stop collecting model-chosen evidence, so a hole may borrow the rule the same edge has at a more specific context. Without this, T3 replaced free T0 steps with small calls and cost more than it saved.
+10. **One subcall, first step only.** Subcalls are made only for the first call of a response, and a T2/T3 step ends the batch.
+
+**Failed replays and where the model stops** (seed-3 regression, L1, L2)
+
+11. **Failed replays are evidence against the choice that made them.** A replayed step in a failed run is a *negative* for its edge at its contexts, lowering purity (T0) and counting as a miss for the decision-list rules that predicted it (T1). Only the *excess* counts: negatives beyond a `1 − purity` failure rate among all replays of the same choice (`features.excess_negatives`).
+12. **Task-word rules must earn T1.** A rule on a task word replays only once `task_rule_support` (5) model-chosen examples support it (observation rules need 2); each excess negative adds that many again. Until then its branch goes to T2.
+13. **A minority choice blocks T0 until it is outnumbered 8 to 1.** The leading child's share gets one pseudo-count against it when the model has chosen more than one child.
+14. **The model's decision to stop is a choice too.** A forwarded response with no tool call records `runs.ended_after`, and the builder adds an END choice for passing runs. When END leads at the deciding context, the request goes straight to T4 (reason `end@…`); END is never replayed.
+15. **A task-word rule is trusted only on tasks like those that support it** (L1). Each rule stores the task-word sets of its supporting examples (the words at least two examples share; the most recent 40). T1 replays only if the task's best Jaccard similarity to one of them is at least `task_rule_similarity` (0.5); otherwise T2 with reason `unproven_rule`, so each new kind of task costs one small call, once. Observation predicates get no such gate (except at contested commit points, decision 21): similarity over file contents or order details would call almost every input new.
+16. **Failures count per kind of task, not per rule** (L2). A task-word rule also stores the word sets of inputs it replayed into failed runs (`nx`); T1 needs the task to be more similar to a supporting example than to any of them. With 20 passing replays on one kind of task, a second kind now fails once and the first keeps T1 (`test_failures_count_per_input_class_not_per_rule`).
+
+**Replay safety** (S1–S4, B1)
+
+17. **When unsure, say "not read-only".** A false "no" costs one model call or one approval; a false "yes" runs a write unattended. Checks accept what they understand rather than rejecting what they recognise as dangerous.
+18. **Unknown effects are a commit** (S1). Interpreters, shells, scripts, task targets, package scripts and git aliases are commit points. Known-local runners are exempt; `--not-commit` is the per-edge override. The synthetic suite was unchanged task for task.
+19. **Match where programs run, not where words appear** (S3). Subsequence matching flagged 28 of 51 realistic commands wrongly; program-position matching gets 44 of 51 right, the other 7 being the documented exceptions. What the shell decides at run time counts as a commit (S2).
+20. **Taint instead of rewriting** (S4). Git reads trust the repository's config, but a run that edits git config or metadata loses that trust for its remaining steps; computed from the run's own calls, so it needs no state. Rewriting commands with `-c` overrides doesn't cover filters or textconv and changes edge shapes.
+21. **Only the task can choose between irreversible actions** (B1). On tau-bench, `get_order_details` on a pending order is followed by a cancel in some tasks and a modify in others; only the task says which. A rule like `status == pending → cancel` was right in 4 of 5 examples, enough for T0/T1, and replayed irreversible cancels into tasks that wanted a modify. A commit point is now replayed without the model only when the evidence shows no alternative (pooled over every context of the step) or a rule separated the alternatives perfectly with task-rule support on a similar task; every other case gets a T2 call that shows the task. A higher confidence threshold was rejected (the misrouting rule and correct cancel rules have about the same confidence), as was always using T2 for commit points (a small call even where the model has only ever done one thing).
+
+**Runs and episodes** (T2, M1, E4)
+
+22. **User turns are context, never choices.** A user reply is an edge the tree can condition on, but never replayed; the question before it becomes END evidence.
+23. **The boundary is decided by the agent's last turn, not the user's words.** Whether the agent asked something is visible and is what makes a reply a reply. The heuristic is stateless; the header or `episode_mode` overrides it.
+24. **Identify the conversation, then the task in it.** The first call id alone merged conversations whose backend numbers calls (`repro/T2_out.txt`). Session id or first turn, then episode index, then task hash, with the continuation check and forks as a backstop.
 
 ## Known limits
 
-- **Tool execution.** treejit sees the model API, not tool execution. It backtracks its policy, not the world.
-- **Rebuild cost.** The tree is rebuilt in full for a family on each outcome, from its last `max_runs` runs. Pure per-step work is memoized across rebuilds: tokenization, shapes, observation features, node ids, the policy verdicts on reference calls, and each shape's template (a left fold that resumes when the instances only grew). Binding search parses and indexes each observation once instead of once per candidate, and decision lists skip feature values no two examples share. On the sim coding family, a rebuild after one more outcome takes about 90 ms at 100 runs, 0.4 s at 1000 and 0.85 s at 2000 (it was 0.18, 1.0 and 2.2 s). On JSON-heavy observations (tau-bench-like retail, about 800 characters each) it takes 0.2 s at 115 runs and 0.6 s at 300 (it was 1.2 and 6.2 s; `repro/P1_timing.out`). Under the proxy the build runs off the event loop, and `/health` answers within about 10 ms during a 2000-run rebuild. The build is still O(runs) per outcome: an incremental builder that rebuilds only the nodes an outcome touches isn't implemented, because blame decay, `max_runs` windows and per-node instance caps make node rows depend on more than their own runs.
-- **Family keying is heuristic.** A volatile block the masks don't recognise (free text other than git output) that makes up more than about 10–20% of a prompt splits families. So does a large per-project `CLAUDE.md`: two projects on the same harness then get separate trees, which is usually what you want. A harness upgrade that changes more than about 20% of the prompt starts a new family. Counts are halved every 64 distinct prompts, so the stable set follows slow drift. Families migrated from the old prefix keying keep its `startswith(prefix)` fallback, and with it the old over-merging of agents that share that prefix. If two processes add members to the same family at the same moment, one member's counts can be lost (last write wins).
-- **Kinds of tasks are told apart by their words.** A new kind of task that uses the words of a known one (`delete P carefully` next to `delete P`) still gets one misroute from a task-word rule before its failed run blocks it (decision 17). The similarity threshold is global, and it doesn't weigh words.
-- **Observation rules have no similarity gate** (decision 16), except where they choose a contested commit point (decision 24). A chance observation predicate, such as a line of file content that only one kind of task has seen so far, needs 2 supporting examples and is refuted only by the pooled negatives of decision 12.
-- **The first alternative at a commit point can still be misrouted once.** Decision 24 needs evidence of an alternative. After `promote_runs + 1` passing runs in which the model only ever cancelled after a lookup (at every context, general ones included), the first task that wants a modify there gets a T0 cancel. `approve '*'` accepts that risk; approving commit edges one by one, or waiting for more runs, doesn't. The T2 call for a contested commit point also trusts the model to read the task. A real model that picks the wrong option there acts as if it had made the call itself.
-- **END needs a passing run and a visible final answer.** A forwarded inline stream records where the model stopped only if the caller reads it to the stop reason; one closed earlier is logged as 499. Runs without an outcome never add END evidence.
-- **Responses API, phase 1.** Stateful requests (`previous_response_id`, `conversation`) pass through unlearned. Replayed call items go upstream without their item `id` (`fc_tj...` was never issued by the server; whether the API would reject it is unverified, and ids are optional on input). `custom_tool_call` (Codex's freeform `apply_patch`) and `local_shell_call` items are recorded and replayable, but their streaming events (`response.custom_tool_call_input.*`) are unverified against the API. The SSE event sequence was built from the public reference, not a captured Codex trace. A first request whose `input` is a plain string and a later one sending the same message as a list item have different hint anchors (one cache miss).
-- **Inline mode is synchronous.** `AsyncAnthropic` / `AsyncOpenAI` are rejected by `wrap()`; use the proxy for async harnesses. `messages.stream(output_format=...)` (structured outputs), `beta.messages`, `with_raw_response` and `chat.completions.stream()` pass through to the real client unrecorded (the run header is still stripped from `messages.stream`). A `ReplayStream` has `.response = None`, so `request_id` on a replayed `MessageStream` is unavailable.
-- **Compaction and the prompt cache.** The default first-sight mode never changes a message already sent, so it compacts only steps replayed in a burst before a frontier call; a step first sent inside the keep-last window stays full until an epoch (`compact_mode = "epoch"`, only after the cache went cold). The cost model is first-order: no 20-block lookback, no minimum cacheable length, one breakpoint layout.
-- **Commit-point coverage is a list, not a proof.** Programs outside the categories in [Replay safety](#replay-safety) (`cp`, `rm`, `docker build`, `pip install`, an unknown CLI) are writes, not commit points, so an approved edge replays them after `promote_runs` passing runs. Commands the shell builds at run time from data we don't see (a function or alias defined in an earlier call, `$(cat cmd.txt)` inside a script file, a Makefile target that pushes) are only caught when the call itself shows an opaque executor. Tools with their own exec hooks (`sed` `e`, `vim -c`, `git difftool`, repo-configured `pre-commit`) are writes, not commit points.
-- **Repository taint sees calls, not the disk.** It catches writes to git metadata and config that a call names. A `git pull`/`checkout`/`apply` that brings in a `.gitattributes` or an embedded bare repository, a `cp -r` of a bare repository under another name, or a file tool writing a bare repository's `config` doesn't taint the run: that is the trusted-checkout assumption (see `trust_repo_config`). A `cd` in an earlier call isn't tracked either.
-- **Run identity.** Without a header or a session id, a run is named from the conversation's first user text and first assistant turn. Two conversations that are identical up to the current step (same text, same call ids, same observations) share a run until they diverge, and then the later one continues in a fork. That takes weak call ids or a text-only first answer. A harness that clears old tool results (Claude Code's context editing) changes the salt of weak ids, which starts a new run. `/compact` replaces the history, so the conversation after it is a new conversation to treejit, with a new root path. A session id alone doesn't survive it either, since the key includes the first user text. A request row whose conversation never sends another request after a weak-id first response keeps `run_id` NULL. The deferral is kept in memory, so a restart between the two requests has the same effect.
-- **Episode boundaries are a heuristic.** A new task typed after the agent asked a question ("Want me to open a PR?" / "No. Now fix the login bug") continues the episode as a `text` step, and a follow-up request after a turn that asked nothing ("now also handle the error case") starts a new episode, whose root path starts fresh. Set `X-TreeJIT-Episode` or `episode_mode` when the harness knows where tasks begin. The agent's own text isn't part of the context, so an acknowledgement "yes" (after a turn that asked nothing) is recorded as `text`, not `yes`. `show` and `export` draw the root path only down to a user step; the nodes after it appear under the macros.
+- **No real-model runs.** All results come from a simulated model or a tau-bench oracle. `--agent claude` and `repro/X2_live_check.py` are ready but have not run (no API key). Whether current Claude models accept replayed turns without thinking blocks is open.
+- **Tool execution is invisible.** treejit sees the model API, not tool execution. It backtracks its policy, not the world; a tool with side effects outside the call's arguments is judged by its call alone.
+- **The first alternative at an uncontested commit point can be misrouted once.** Decision 21 needs evidence of an alternative. After `promote_runs + 1` passing runs in which the model only ever cancelled after a lookup (at every context), the first task that wants a modify there gets a replayed cancel. `approve '*'` accepts that risk; approving commit edges one by one doesn't. The T2 call at a contested commit point also trusts the model to read the task.
+- **Observation rules have no similarity gate** (decision 15), except at contested commit points. A chance observation predicate (a line of file content only one kind of task has shown so far) needs 2 supporting examples and is refuted only by the pooled negatives of decision 11.
+- **Kinds of tasks are told apart by their words.** A new kind of task that uses a known kind's words (`delete P carefully` next to `delete P`) still gets one misroute from a task-word rule before its failed run blocks it (decision 16). The similarity threshold is global and unweighted.
+- **Family keying is heuristic.** A volatile block the masks don't recognise that makes up more than about 10–20% of a prompt splits families, as does a large per-project `CLAUDE.md`. A harness upgrade that changes more than about 20% of the prompt starts a new family. Families migrated from the old prefix keying keep its `startswith` fallback. Concurrent writers to one family can lose one member's counts.
+- **Episode boundaries are a heuristic.** A new task typed after the agent asked a question continues the episode as a `text` step; a follow-up after a turn that asked nothing starts a new episode with a fresh root path. Set `X-TreeJIT-Episode` or `episode_mode` when the harness knows. `show`/`export` draw the root path only down to a user step.
+- **Run identity without a header or session id** is derived from the first user text and first assistant turn: two conversations identical up to the current step share a run until they diverge. Context editing that clears old tool results changes the salt of weak ids (a new run); `/compact` makes a new conversation to treejit. A weak-id first response whose conversation never continues keeps `run_id` NULL.
+- **Responses API wire details are unverified** against a real Codex trace: the SSE event sequence was built from the public reference; replayed call items go upstream without their item `id`; `custom_tool_call`/`local_shell_call` streaming events are unverified. Stateful requests pass through unlearned.
+- **Commit-point coverage is a list, not a proof.** Programs outside the categories above (`cp`, `rm`, `docker build`, `pip install`, an unknown CLI) are writes, not commit points, so an approved edge replays them after `promote_runs` passing runs. Commands built at run time from data treejit doesn't see (a function defined in an earlier call, a Makefile target that pushes) are caught only when the call itself shows an opaque executor.
+- **Repository taint sees calls, not the disk.** A `git pull`/`checkout` that brings in a `.gitattributes` or a bare repository, or a `cd` in an earlier call, isn't tracked: that is the trusted-checkout assumption.
+- **Rebuild cost is O(runs) per outcome.** Memoization made it cheap (P1), and the proxy builds off the event loop, but there is no incremental builder. `--rebuild-every K` in the bench trades freshness for speed.
+- **Inline mode is synchronous.** `AsyncAnthropic`/`AsyncOpenAI` are rejected by `wrap()`; use the proxy. `messages.stream(output_format=...)`, `beta.messages` and `chat.completions.stream()` pass through unrecorded.
+- **Compaction and the prompt cache.** First-sight compacts only steps replayed in a burst; the cache model is first-order (no 20-block lookback, no minimum cacheable length).
+- **END needs a passing run and a visible final answer.** A forwarded inline stream closed before its stop reason is logged as 499 and adds no END.
+- **The final answer always costs one full call.**
+
+## CLI reference
+
+`--db` (default `treejit.db` or `$TREEJIT_DB`) and `--config` (a `treejit.toml`) go before or after the subcommand. Ids (edges, nodes, families, runs) can be any unique prefix of at least 4 characters; the CLI prints 8.
+
+| command | what it does |
+|---|---|
+| `treejit serve [--host H] [--port P]` | run the proxy (`/v1/messages`, `/v1/chat/completions`, `/v1/responses`, `POST /outcome`, `GET /health`, `GET /stats`; other paths pass through) |
+| `treejit show [--family F] [--ids] [--depth N] [--no-macros]` | print the tree: tiers, bindings, guards, decision lists, macros; `--ids` adds short node/edge ids |
+| `treejit runs [--limit N]` | list recent runs |
+| `treejit explain <run\|latest> [--json]` | per-step timeline: who decided each step (`model`, `T0`/`T1`, `T2`, `ck`, `T3`, `user`), why, tokens; failed small calls as their own rows; a `small calls: N (M failed), T tokens` header line. Its token total equals the `requests` table's for the run. |
+| `treejit outcome <run\|latest> pass\|fail\|error [--reason R]` | report a run's verifier result (rebuilds the family) |
+| `treejit pending [--family F] [--json]` | promoted edges held back only by policy: example call, evidence, the approve commands |
+| `treejit approve --review [--family F]` | walk the pending queue: `y` = at the listed nodes, `e` = everywhere, `n`/`s` = leave, `q` = stop |
+| `treejit approve <edge\|'*'> [--node N]` | let replay cross a write edge / commit point (commit points still need `promote_runs + 1` passing runs) |
+| `treejit approve <edge> --not-commit` | also declare this edge not a commit point (a local script); per edge, never implied by `'*'` |
+| `treejit approve <edge> --revoke` / `treejit revoke <edge> [--node N] [--not-commit]` | undo an approval (`--not-commit`: withdraw only that declaration) |
+| `treejit pin <node> [edge] [--unpin]` | force-promote a node or edge and protect it from eviction |
+| `treejit prune [--days D] [--min-hits N] [--compact-days C] [--dry-run]` | evict cold nodes (defaults `evict_days`, `evict_min_hits`) and compaction decisions of runs idle longer than C days (default `compact_retention_days`; 0 keeps them) |
+| `treejit export --format html\|mermaid\|skills [--out PATH] [--family F]` | export the tree as an HTML page, a Mermaid graph, or a SKILL.md |
+| `treejit build [--family F]` | rebuild trees from the trace log |
+| `treejit stats [--family F]` | replay vs frontier counts, small calls |
+
+## Configuration
+
+Every key has a default. A `treejit.toml` (`[treejit]` table; `--config`, `$TREEJIT_CONFIG`, or `./treejit.toml`) or `TREEJIT_<KEY>` environment variables override them (lists as comma-separated values). Unknown keys are an error.
+
+| key | default | meaning |
+|---|---|---|
+| `db` | "treejit.db" | SQLite file (trace log, tree, approvals) |
+| `promote_runs` | 2 | N: distinct passing runs before an edge goes live (commit points need N + 1) |
+| `max_depth` | 12 | D: root-anchored path depth; deeper steps use n-gram contexts only |
+| `ngram` | [3, 2, 1] | last-k-edge macro contexts, most specific first |
+| `purity` | 0.8 | minimum share of the evidence a child needs to be chosen (T0) |
+| `task_rule_support` | 5 | model-chosen examples a task-word rule needs before T1 replays on it (decision 12) |
+| `task_rule_similarity` | 0.5 | minimum Jaccard similarity of the task to a supporting example (decision 15; 0 = off) |
+| `episode_mode` | "auto" | `auto` \| `conversation` \| `turn`: where a new task starts in a conversation |
+| `theta` | 0.5 | confidence budget: the product of replayed edges' confidences must stay above it |
+| `hard_cap` | 8 | K: max consecutive replayed steps |
+| `batch` | true | collapse independent proven read-only edges into one assistant message |
+| `max_batch` | 4 | max calls in one batched message |
+| `t2` | true | enable T2 (choose among known children, budget checkpoints) |
+| `t3` | true | enable T3 (fill holes of a known edge) |
+| `small_model` | "" | model for T2/T3 subcalls (empty: the request's model) |
+| `subcall_max_tokens` | 512 | `max_tokens` of a subcall (raised to 4096 on always-thinking models) |
+| `subcall_format` | "auto" | Anthropic subcall shape: `auto` \| `json_schema` \| `tool_auto` \| `tool` (forced; 400s on current models) |
+| `subcall_effort` | "low" | `output_config.effort` for subcalls on models that take it (empty: never) |
+| `tomb_k` | 2.0 | decayed failures across distinct inputs before an edge is tombstoned |
+| `tomb_prob` | 0.5 | minimum failure share for a tombstone |
+| `half_life_days` | 14.0 | half-life of the decay applied to old evidence |
+| `max_runs` | 2000 | most recent runs per family a rebuild reads |
+| `rebuild` | "auto" | `auto` (background under `serve`, sync otherwise) \| `sync` \| `background` |
+| `evict_days` | 30.0 | `prune`: evict nodes idle this long ... |
+| `evict_min_hits` | 3 | ... with fewer hits than this |
+| `hints` | "failures" | frontier hints on T4 calls: `off` \| `failures` (only where a child failed) \| `always` |
+| `hint_max` | 5 | max hint lines |
+| `compact` | false | enable frontier prefix compaction |
+| `compact_keep_last` | 3 | the last N observations always go upstream in full |
+| `compact_min_chars` | 400 | smaller observations are never compacted |
+| `compact_mode` | "first_sight" | `first_sight` (append-only) \| `epoch` (+ re-compact when the cache is cold) \| `window` (legacy) |
+| `compact_epoch_ttl` | 300.0 | `epoch`: seconds after which a conversation's cache counts as cold |
+| `compact_keep_path` | false | also keep observations an earlier step's bindings read (old rule 3b) |
+| `compact_retention_days` | 7.0 | compaction decisions and hints of runs idle this long are pruned (0 = never) |
+| `replay_tools` | Read, Glob, Grep, LS, NotebookRead, … (21 entries) | non-shell tools that are read-only (globs) |
+| `shell_tools` | Bash, bash, shell, run_shell_command, execute_command, … (7 entries) | tools whose `command`/`cmd` argument is a shell command |
+| `commit_tools` | send_\*, cancel_\*, return_\*, exchange_\*, modify_\*, … (15 entries) | non-shell tools that are commit points (globs) |
+| `commit_commands` | git push, npm publish, pnpm publish, yarn publish, cargo publish, … (31 entries) | shell command patterns that are commit points (opaque executors are added by the policy) |
+| `extra_readonly_commands` |  | programs to treat as read-only with any arguments |
+| `trust_repo_config` | true | git reads trust the repository's config (false: git reads need approval) |
+| `host` | "127.0.0.1" | `serve` bind address |
+| `port` | 8787 | `serve` port |
+| `anthropic_upstream` | "https://api.anthropic.com" | where Anthropic requests are forwarded |
+| `openai_upstream` | "https://api.openai.com" | where OpenAI (Chat Completions, Responses) requests are forwarded |
 
 ## Development
 
 ```bash
 pip install -e '.[dev]' -e bench
-pytest -q                                   # ~830 tests (mostly the policy tables); tau-bench tests skip without TAUBENCH_PATH
+pytest -q                                   # ~860 tests; tau-bench tests skip without TAUBENCH_PATH
+pyflakes src bench/src tests
 python -m treejit_bench --tasks 200 --out bench_out [--via-proxy] [--seed N] [--family coding|retail|mixed] \
     [--modes baseline,treejit,treejit+ok,treejit+ok+compact] [--payload none|tau|claude-code] [--cache] [--rebuild-every K]
 TAUBENCH_PATH=../tau-bench python -m treejit_bench --suite taubench --tau-split test --out tau_out
 ```
+
+[`PLAN.md`](PLAN.md) lists the issues closed in the last round of work, with their outcomes; [`repro/`](repro/README.md) holds the reproduction scripts.

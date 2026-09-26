@@ -65,9 +65,9 @@ system chars=392
 
 === hints and the thinking drop (compaction off vs on, first_sight) ===
    scenario                           breakpoints      off    off+X   X cost  first_sight+X  vs off+X
-   interleaved, hints=always              harness   11,850   12,133    +2.4%         12,133     +0.0%
-   interleaved, hints=always                 auto   11,850   41,066  +246.5%         41,066     +0.0%
-   bursty, hints=always                   harness   15,409   15,531    +0.8%         12,382    -20.3%
-   bursty, hints=always                      auto   15,409   39,448  +156.0%         31,316    -20.6%
+   interleaved, hints=always              harness   11,850   12,573    +6.1%         12,573     +0.0%
+   interleaved, hints=always                 auto   11,850   12,318    +3.9%         12,318     +0.0%
+   bursty, hints=always                   harness   15,409   15,695    +1.9%         12,546    -20.1%
+   bursty, hints=always                      auto   15,409   15,585    +1.1%         12,436    -20.2%
    lead (model step 0), thinking on       harness   14,947   14,964    +0.1%          8,344    -44.2%
    lead (model step 0), thinking on          auto   14,947   14,964    +0.1%          8,344    -44.2%

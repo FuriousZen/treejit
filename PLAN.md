@@ -95,4 +95,37 @@ Merge order within a wave: the owner of the most shared files goes first (W2 in 
 | A | merged (W1, W2, W3, W5, W6, W9) |
 | B | merged (W4, W7) |
 | C | merged (W8, W10) |
-| D | running: independent review; full sim + tau-bench measurement and README consolidation |
+| D | W11 docs/measurement done (fresh sim seeds 0–5 and tau-bench at `6e1177f`, README consolidated, repro index); independent src review running separately |
+
+## Outcome
+
+Measured at `6e1177f` (all of waves A–C merged). Sim: `python -m treejit_bench --tasks 200 --seed S --modes baseline,treejit,treejit+ok,treejit+ok+compact`, S = 0–5. tau-bench: oracle agent, seed 0, noise 0.05, `--rebuild-every 1`. Numbers are in the README's Results section.
+
+**Global invariant 3 holds.** Sim: on every seed both treejit modes succeed at least as often as the plain agent (edges approved: 199–200/200, plain agent 185–193). tau-bench: every treejit mode has exactly the plain agent's reward on retail test 115, retail train 300 and airline test 50, task for task: the failing tasks are the oracle's slips (7, 18 and 1), and no treejit mode fails a task the plain agent passes.
+
+| ID | Fixed in | Verified by | Residual limits |
+|---|---|---|---|
+| B1 | W10 `0516b02` (merge `c1e74bf`) | `tests/test_commit_gate.py`; tau-bench retail train 300 and airline test 50 with edges approved: zero treejit-only failures (was 7 + 1) | The first alternative at an *uncontested* commit point can still be misrouted once (after `promote_runs + 1` runs that only ever cancelled); T2 trusts the model to read the task. |
+| S1 | W2 `c28f43d` (merge `db2c3d7`) | `tests/test_policy_security.py` (the 40 S1 cases, `--not-commit`, T3 reason re-check); sim unchanged | Commit-point coverage is a list: unknown CLIs (`cp`, `docker build`) are writes, not commit points. |
+| S2 | W2 | `tests/test_policy_security.py` (every S2 row a commit, full ANSI-C decoding) | Functions/aliases defined in earlier calls aren't modelled. |
+| S3 | W2 | `tests/test_policy_security.py` (44/51, the 7 exceptions documented in the README) | Dry runs, local `rsync`, `npm run <x>` stay commit points by design. |
+| S4 | W2 | `trust_repo_config` + per-run taint tests | Taint sees calls, not the disk (trusted-checkout assumption). |
+| T2 | W4 `926cc25` (merge `bc49af6`) | `tests/test_identity.py`; `repro/T2_run_identity.py` | Header-less, session-less conversations identical up to the current step share a run until they diverge; `/compact` starts a new conversation. |
+| M1 | W4 | `tests/test_episodes.py` (two-turn confirm flow is one episode; write replayed after "yes") | Boundaries are a heuristic; override with `X-TreeJIT-Episode` / `episode_mode`. |
+| E4 | W4 | `tests/test_explain_proxy.py`; `repro/E4_first_step_subcall.py` at HEAD → `repro/E4b_after_out.txt` (every subcall row has a run id; explain total = table total) | – |
+| L1 | W1 `4ee215d` (merge `588ffe6`) | `tests/test_learning.py`; seed 3 is 200/200 with edges approved | Observation rules have no similarity gate. |
+| L2 | W1 | `test_failures_count_per_input_class_not_per_rule` | A new kind of task using a known kind's words still gets one misroute. |
+| P1 | W7 `87d915b` (merge `a17d1d8`) | `tests/test_perf.py`; tau-bench treejit modes now take ~2.5 min on test 115 (were 6–13 min) | Rebuild is still O(runs) per outcome; no incremental builder. |
+| C1 | W3 `11a751d` (merge `438a497`) | `tests/test_compaction.py` (append-only invariant, billed ≤ off); `repro/C1_after_small.txt`, `repro/C1_bench_billed_out.txt` regenerated at `6e1177f` (first-sight −12% to −14% billed on seeds 0–5) | `epoch`/`window` modes break the prefix (and preserved thinking). |
+| C2 | W3 | rule 3b off by default (`compact_keep_path`); trajectories identical on seeds 0–5 | – |
+| C3 | W3 | `Store.prune_compactions`, `treejit prune --compact-days` | – |
+| K1 | W6 `557797b` (merge `7666535`) | `tests/test_families.py` | Keying is heuristic (large unmasked volatile blocks split families). |
+| T1 | W5 `ef78b1c` (merge `844ef2f`) | `tests/test_inline_stream.py` | Sync clients only; `beta.messages`, `chat.completions.stream()` pass through unrecorded. |
+| H1 | W8 `720ab0e` (merge `48dfb27`) | `tests/test_hints.py`; cache model bills `hints = always` at +1.1% to +6.1% (the hint's own tokens; was +156–247%) | – |
+| X1 | W8 | `tests/test_subcalls_compat.py` (no forced `tool_choice` for Anthropic; fake always-thinking model) | **Unverified live** (no API key). |
+| X2 | W8 | append-only forwards (hints, first-sight compaction); model-aware thinking drop; `repro/X2_live_check.py --offline` | **Open**: whether replayed turns without thinking blocks are accepted; `X2_live_check.py` answers it once a key exists. |
+| R1 | W8 | `tests/test_responses.py` | Wire details unverified against a captured Codex trace; stateful requests pass through unlearned. |
+| E1 | W9 `12bc402` (merge `4e279a6`) | `tests/test_taubench.py` (skips without `TAUBENCH_PATH`); runs above | Real-model runs not done (no key). |
+| E2 | W9 | `--payload`, `--cache`; default output unchanged | First-order cache model. |
+| E3 | W9 | small-calls panel in `docs/learning_curve.html` (regenerated at `6e1177f`, rendered light/dark at 1200 px and 390 px) | – |
+| E5 | – | no-go, deferred | Revisit with real traffic. |

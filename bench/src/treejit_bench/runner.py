@@ -47,7 +47,7 @@ class TaskResult:
     success: bool
     reason: str
     model_calls: int = 0      # full model calls (T4, or every call for the plain agent)
-    small_calls: int = 0      # treejit T2/T3 subcalls (short prompt, forced tool)
+    small_calls: int = 0      # treejit T2/T3 subcalls (short prompt, structured output)
     tool_calls: int = 0
     replayed_calls: int = 0
     side_exits: int = 0       # replayed steps whose result broke the learned postcondition

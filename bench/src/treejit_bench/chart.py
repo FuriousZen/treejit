@@ -137,7 +137,7 @@ const METRICS = [
   { key: "calls", title: "Model calls per task", sub: "lower is better", f: m => roll(m.calls, D.window), fmt: v => v.toFixed(2) },
   { key: "tokens", title: "Tokens per task", sub: "prompt + completion sent to the model", f: m => roll(m.tokens, D.window), fmt: v => Math.round(v).toLocaleString() },
   { key: "served", title: "Tool calls served by replay", sub: "% of the task's tool calls, no full model call", f: m => rollRatio(m.served, D.window), fmt: v => v.toFixed(0) + "%" },
-  { key: "small", title: "Small calls per task (T2/T3)", sub: "short forced-tool subcalls; the plain agent makes none", f: m => roll(m.small, D.window), fmt: v => v.toFixed(2) },
+  { key: "small", title: "Small calls per task (T2/T3)", sub: "short structured subcalls; the plain agent makes none", f: m => roll(m.small, D.window), fmt: v => v.toFixed(2) },
 ];
 if (D.cost) METRICS.push({ key: "cost", title: "Cost per task", sub: "input-token equivalents: " + (D.cache ? `cache write ${D.weights.write}×, read ${D.weights.read}×, ` : "") + `output ${D.weights.output}×`, f: m => roll(m.cost, D.window), fmt: v => Math.round(v).toLocaleString() });
 const HIDE_BASELINE = new Set(["served", "small"]);

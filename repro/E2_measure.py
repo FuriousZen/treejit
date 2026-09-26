@@ -7,11 +7,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import statistics as st
 import sys
 
-sys.path[:0] = ["/home/user/treejit/src", "/home/user/treejit/bench/src"]
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path[:0] = [os.path.join(_ROOT, "src"), os.path.join(_ROOT, "bench", "src")]
+from treejit.subcalls import subcall_tool  # noqa: E402
 from treejit_bench import runner, sim  # noqa: E402
 
 LOG: list[dict] = []
@@ -19,7 +22,7 @@ _orig = sim.SimModel.__call__
 
 
 def _spy(self, body):
-    forced = (body.get("tool_choice") or {}).get("name", "")
+    forced = subcall_tool(body)  # T2/T3 subcall: structured outputs (output_config.format) or a forced tool
     sysc = len(body.get("system", "") if isinstance(body.get("system"), str) else json.dumps(body.get("system")))
     toolc = len(json.dumps(body.get("tools", [])))
     msgc = len(json.dumps(body["messages"]))
