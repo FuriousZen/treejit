@@ -17,7 +17,7 @@ This is the MVP from the handoff, plus value branching and composite argument te
 | Area | State |
 |---|---|
 | Anthropic Messages + OpenAI Chat Completions dialects, JSON and SSE (replay and pass-through) | done |
-| Trace recorder, stable system-prompt prefix learning, span-preserving shell tokenizer | done |
+| Trace recorder, system-prompt family keying (masked line sets), span-preserving shell tokenizer | done |
 | Tree builder: anti-unification, provenance bindings, last-k-edge macros, root depth cap D | done |
 | Failed replays as negative evidence, earned task-word rules, END (the model stops here) as a choice | done |
 | T0 replay / T1 guarded branch, postcondition side exits, confidence budget, hard cap K, batching | done |
@@ -132,7 +132,7 @@ Each tree edge has a tier: **hot** (replayable), **live** (promoted but blocked)
 | module | job |
 |---|---|
 | `dialects.py` | Parse requests into an *episode* (task + (call, observation) steps). Build replay responses as JSON or SSE. Accumulate upstream SSE for usage. Inject hints. |
-| `families.py` | Tree key = tool schemas + the learned stable prefix of the system prompt (longest common prefix, trimmed to a line). |
+| `families.py` | Tree key = tool schemas + the stable lines of the system prompt. Lines are masked (dates, times, absolute paths, hashes, uuids, URLs, numbers; git status and commit-log lines collapse to one placeholder), hashed and counted per family, weighted by length. A line is stable when ≥80% of the family's distinct prompts have it (every line, for a 1-member family). A prompt joins a family when it has ≥90% of the family's stable characters and the stable lines make up ≥80% of its own; ties go to the best coverage, then the oldest family. Volatile lines anywhere (an early `<env>`, a large `gitStatus`) don't split a family; a different agent sharing a short preamble doesn't merge into one. Ids never change. Families from the old prefix keying are seeded from their prefix and keep its `startswith` rule. `families.prefix` shows the stable (masked) lines. |
 | `shellwords.py` | Span-preserving shell tokenizer (quotes, `$(...)`, heredocs, operators). Replayed commands are spliced into the original text, so quoting survives. |
 | `policy.py` | What replay may emit unattended: the read-only allowlist and commit points (see [Replay safety](#replay-safety)). |
 | `templates.py` | Edge = tool + arg keys + per-segment command heads (`git commit`, `npm test`). Calls with one shape are anti-unified per token into constants and variables. |
@@ -255,7 +255,7 @@ Each forwarded request records `compacted N obs/C chars` in its note and the cha
 
 - **Tool execution.** treejit sees the model API, not tool execution. It backtracks its policy, not the world.
 - **Rebuild cost.** The tree is rebuilt in full for a family on each outcome (tens of ms at a few hundred runs, capped by `max_runs`). An incremental builder is future work.
-- **Stable-prefix learning.** A dynamic block early in the system prompt shrinks the learned prefix to whatever precedes it.
+- **Family keying is heuristic.** A volatile block the masks don't recognise (free text other than git output) that makes up more than about 10–20% of a prompt splits families. So does a large per-project `CLAUDE.md`: two projects on the same harness then get separate trees, which is usually what you want. A harness upgrade that changes more than about 20% of the prompt starts a new family. Counts are halved every 64 distinct prompts, so the stable set follows slow drift. Families migrated from the old prefix keying keep its `startswith(prefix)` fallback, and with it the old over-merging of agents that share that prefix. If two processes add members to the same family at the same moment, one member's counts can be lost (last write wins).
 - **One misroute before a chance rule is caught.** A task-word rule whose first `task_rule_support` examples all agree by chance still replays once into the input that breaks it; the failed run then demotes it (seed 3, task 13). A higher `task_rule_support` trades small calls for fewer of these.
 - **Negatives are counted per rule, not per input class.** A rule with many passing replays that starts misrouting a new kind of task needs several failures before the excess over the tolerated rate (`1 - purity`) shows. Only then is it demoted.
 - **END needs a passing run and a visible final answer.** A forwarded inline stream records where the model stopped only if the caller reads it to the stop reason; one closed earlier is logged as 499. Runs without an outcome never add END evidence.

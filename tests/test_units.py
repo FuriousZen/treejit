@@ -169,7 +169,7 @@ def test_stable_prefix_learning_merges_dynamic_system_prompts(tmp_path):
     f2 = resolve(st, base + "Today's date: 2026-09-02\ncwd: /b\n", tools, "anthropic")
     f3 = resolve(st, base + "Today's date: 2026-09-03\n", tools, "anthropic")
     assert f1 == f2 == f3
-    assert st.q1("SELECT prefix FROM families WHERE id=?", (f1,))["prefix"] == base
+    assert st.q1("SELECT prefix FROM families WHERE id=?", (f1,))["prefix"].startswith(base)  # stable lines, masked
     other = resolve(st, "A completely different agent prompt. " * 5, tools, "anthropic")
     assert other != f1
     assert resolve(st, base, [{"name": "Other"}], "anthropic") != f1
