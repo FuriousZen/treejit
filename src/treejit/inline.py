@@ -342,7 +342,7 @@ class _Create:
         headers = {k: v for k, v in extra.items() if v is not None}
         if self.run_id and not any(k.lower() == RUN_HEADER for k in headers):
             headers["X-TreeJIT-Run"] = self.run_id
-        fwd_headers = {k: v for k, v in extra.items() if k.lower() != RUN_HEADER}
+        fwd_headers = {k: v for k, v in extra.items() if not k.lower().startswith("x-treejit")}
         stream = bool(kwargs.get("stream"))
         res = self.jit.handle(self.dialect, kwargs, headers)
         if res.kind == "subcall":
@@ -373,7 +373,7 @@ class _Create:
         real = getattr(getattr(self.create, "__self__", None), "stream", None)
         if kwargs.get("output_format") is not None and callable(real):
             # structured-output parsing lives in the SDK's stream(): pass through, unrecorded
-            extra = {k: v for k, v in (kwargs.pop("extra_headers", None) or {}).items() if k.lower() != RUN_HEADER}
+            extra = {k: v for k, v in (kwargs.pop("extra_headers", None) or {}).items() if not k.lower().startswith("x-treejit")}
             return real(**kwargs, extra_headers=extra) if extra else real(**kwargs)
 
         def request() -> Any:

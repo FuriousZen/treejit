@@ -21,7 +21,7 @@ Pieces
   ScriptedUser            the task instruction is the first user message. Default single-turn: the
                           episode ends at the agent's first text reply. `confirm` answers an agent
                           question with a confirmation (for real models, which ask before writes; see
-                          PLAN M1: treejit currently splits such episodes).
+                          runs send `X-TreeJIT-Episode: conversation` so one task is one episode).
   run_taubench(...)       -> list[runner.TaskResult], scored by tau-bench's own Env.calculate_reward
                           (database hash after the episode == hash after the ground-truth actions, and
                           every expected output appears in a reply).
@@ -428,9 +428,9 @@ def run_taubench(n_tasks: int | None = None, env_name: str = "retail", split: st
         jit = _fresh_jit(db, mode, **overrides)
         wrapped = jit.wrap(model, dialect="anthropic")  # ClaudeAgent is SDK-shaped, OracleAgent a plain callable
         if agent == "claude":
-            call = lambda body, rid: wrapped.messages.create(**body, extra_headers={"X-TreeJIT-Run": rid})  # noqa: E731
+            call = lambda body, rid: wrapped.messages.create(**body, extra_headers={"X-TreeJIT-Run": rid, "X-TreeJIT-Episode": "conversation"})  # noqa: E731
         else:
-            call = lambda body, rid: wrapped(body, extra_headers={"X-TreeJIT-Run": rid})  # noqa: E731
+            call = lambda body, rid: wrapped(body, extra_headers={"X-TreeJIT-Run": rid, "X-TreeJIT-Episode": "conversation"})  # noqa: E731
     scripted = ScriptedUser(user)
     env = suite.env
     results = []

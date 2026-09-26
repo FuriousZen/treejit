@@ -21,7 +21,7 @@ from typing import Any
 from .bindings import Sources, find_rule
 from .config import Config
 from .features import excess_negatives, guard_holds, guard_of, learn_decision_list, obs_features, postcondition, task_words
-from .model import Observation, Step, ToolCall
+from .model import Observation, Step, ToolCall, user_ended
 from .policy import commit_reason, is_readonly
 from .store import Store, dumps
 from .templates import anti_unify, call_slots, edge_id, label, shape_of, var_slots
@@ -45,6 +45,7 @@ class RunData:
     updated: float
     outcome_at: float
     ended_after: int | None = None    # the model gave its final answer after this many steps
+    inherited: int = 0                # leading steps copied from a finished run this one forks: context only
     steps: list[Step] = field(default_factory=list)
     replayed: list[bool] = field(default_factory=list)
     eids: list[str] = field(default_factory=list)
@@ -74,7 +75,8 @@ def load_runs(store: Store, family: str, limit: int = 1_000_000) -> list[RunData
     rows = store.q("SELECT * FROM runs WHERE family=? ORDER BY created DESC LIMIT ?", (family, limit))
     for r in reversed(rows):
         runs[r["id"]] = RunData(r["id"], r["outcome"], r["reason"], r["task"] or "", r["task_hash"] or "",
-                                r["created"], r["updated"], r["outcome_at"] or r["updated"], r["ended_after"])
+                                r["created"], r["updated"], r["outcome_at"] or r["updated"], r["ended_after"],
+                                r["inherited"] or 0)
     if not runs:
         return []
     for s in store.q("SELECT s.* FROM steps s JOIN runs r ON r.id=s.run_id WHERE r.family=? ORDER BY s.run_id, s.idx", (family,)):
@@ -133,8 +135,18 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
     node_runs: dict[str, set] = defaultdict(set)
     node_seen: dict[str, float] = defaultdict(float)
     step_nodes: dict[tuple[str, int], list[str]] = {}
+    # User steps (M1) are context, never choices: a later user turn is not something the model (or
+    # replay) produces. When it answers a finished agent turn, the model chose to stop and talk there,
+    # which is END evidence at that context (below). Inherited steps (a fork's copied prefix) were
+    # counted in the run they came from.
+    user_stops: list[tuple[RunData, int]] = []
     for rd in runs:
         for i in range(len(rd.steps)):
+            if rd.steps[i].is_user or i < rd.inherited:
+                step_nodes[(rd.id, i)] = []
+                if rd.steps[i].is_user and user_ended(rd.steps[i].call.name) and (i > rd.inherited or not rd.inherited):
+                    user_stops.append((rd, i))
+                continue
             nids = []
             for kind, ctx in contexts(rd.eids, i, cfg):
                 nid = node_id(family, kind, ctx)
@@ -159,11 +171,12 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
     # the node's evidence (so purity and decision lists can say "the model stops here") but is
     # never replayed: the final answer always comes from the model.
     node_end: dict[str, int] = defaultdict(int)
-    ends: dict[str, list[RunData]] = defaultdict(list)
-    for rd in runs:
-        if not rd.passed or rd.ended_after != len(rd.steps):
-            continue
-        for kind, ctx in contexts(rd.eids, len(rd.steps), cfg):
+    ends: dict[str, list[tuple[RunData, int]]] = defaultdict(list)
+    stops = [(rd, len(rd.steps)) for rd in runs
+             if rd.passed and rd.ended_after == len(rd.steps) and len(rd.steps) > rd.inherited]
+    stops += [(rd, i) for rd, i in user_stops if rd.passed]
+    for rd, at in stops:
+        for kind, ctx in contexts(rd.eids, at, cfg):
             nid = node_id(family, kind, ctx)
             if evicted.get(nid, 0) >= rd.updated:
                 continue
@@ -172,7 +185,7 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
             node_seen[nid] = max(node_seen[nid], rd.updated)
             node_end[nid] += 1
             node_pass_n[nid] += 1
-            ends[nid].append(rd)
+            ends[nid].append((rd, at))
 
     # Side exits teach. A replayed step whose result broke the edge's postcondition is
     # a miss against the context that chose it; if the model then took over and the run
@@ -196,7 +209,7 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
             if not post or guard_holds(post, rd.feats[i]):
                 continue
             misses[(used, rd.eids[i])] += 1
-            if rd.passed and i + 1 < len(rd.steps) and not rd.replayed[i + 1]:
+            if rd.passed and i + 1 < len(rd.steps) and not rd.replayed[i + 1] and not rd.steps[i + 1].is_user:
                 for nid in step_nodes.get((rd.id, i), []):
                     corr[(nid, rd.eids[i + 1])].append((rd, i))
                     node_pass_n[nid] += 1
@@ -231,12 +244,15 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
         pairs: list[tuple[str, str]] = []
         for i in range(len(rd.steps)):
             nids = step_nodes.get((rd.id, i), [])
-            if nids and (nids[0], rd.eids[i]) not in pass_pairs:
+            if not nids:
+                continue  # a user step, an inherited step, or an evicted context: not a choice to blame
+            if (nids[0], rd.eids[i]) not in pass_pairs:
                 pairs = [(nid, rd.eids[i]) for nid in nids if (nid, rd.eids[i]) not in pass_pairs]
                 break
         else:
-            last = len(rd.steps) - 1
-            nids = step_nodes.get((rd.id, last), [])
+            last = next((j for j in range(len(rd.steps) - 1, -1, -1)
+                         if not rd.steps[j].is_user and j >= rd.inherited), -1)
+            nids = step_nodes.get((rd.id, last), []) if last >= 0 else []
             pairs = [(nids[0], rd.eids[last])] if nids else []
         for pair in pairs:
             blame[pair].append((w, rd.task_hash, rd.reason, rd.id))
@@ -320,7 +336,7 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
     for (nid, eid), lst in corr.items():
         by_node[nid].extend((rd, i, eid) for rd, i in lst)
     for nid, lst in ends.items():
-        by_node[nid].extend((rd, len(rd.steps), END) for rd in lst)
+        by_node[nid].extend((rd, at, END) for rd, at in lst)
 
     def example(rd: RunData, i: int, eid: str) -> tuple[str, dict, str, set]:
         text = rd.steps[i - 1].obs.text if i > 0 and rd.steps[i - 1].obs else ""

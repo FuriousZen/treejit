@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from typing import Any
 
 from .config import Config
 from .engine import TreeJIT
@@ -203,37 +204,44 @@ def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="treejit", description="Inference proxy with memory.")
     p.add_argument("--db", help="SQLite file (default: treejit.db or $TREEJIT_DB)")
     p.add_argument("--config", help="treejit.toml")
+    # --db / --config are accepted after the subcommand too (`treejit explain latest --db x.db`)
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--db", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    common.add_argument("--config", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    s = sub.add_parser("serve", help="run the proxy")
+    def add(name: str, **kw: Any) -> argparse.ArgumentParser:
+        return sub.add_parser(name, parents=[common], **kw)
+
+    s = add("serve", help="run the proxy")
     s.add_argument("--host")
     s.add_argument("--port", type=int)
     s.set_defaults(fn=cmd_serve)
 
-    s = sub.add_parser("show", help="print the tree")
+    s = add("show", help="print the tree")
     s.add_argument("--family")
     s.add_argument("--ids", action="store_true", help="show short node/edge ids (for pin/approve)")
     s.add_argument("--depth", type=int, default=40)
     s.add_argument("--no-macros", action="store_true")
     s.set_defaults(fn=cmd_show)
 
-    s = sub.add_parser("runs", help="list recent runs")
+    s = add("runs", help="list recent runs")
     s.add_argument("--limit", type=int, default=20)
     s.set_defaults(fn=cmd_runs)
 
-    s = sub.add_parser("outcome", help="report a run's verifier result")
+    s = add("outcome", help="report a run's verifier result")
     s.add_argument("run_id", help="run id, or 'latest'")
     s.add_argument("result", choices=["pass", "fail", "error"])
     s.add_argument("--reason")
     s.set_defaults(fn=cmd_outcome)
 
-    s = sub.add_parser("pin", help="pin a node (or one edge at it): promote and protect from eviction")
+    s = add("pin", help="pin a node (or one edge at it): promote and protect from eviction")
     s.add_argument("node")
     s.add_argument("edge", nargs="?")
     s.add_argument("--unpin", action="store_true")
     s.set_defaults(fn=cmd_pin)
 
-    s = sub.add_parser("approve", help="allow replay to cross a non-read-only edge / commit point")
+    s = add("approve", help="allow replay to cross a non-read-only edge / commit point")
     s.add_argument("edge", nargs="?", help="edge id or unique prefix (>= 4 chars), or '*' for every edge")
     s.add_argument("--node", help="only at this node (default: everywhere)")
     s.add_argument("--revoke", action="store_true")
@@ -244,40 +252,40 @@ def main(argv: list[str] | None = None) -> None:
                         "make target); per edge only, never implied by approve '*'")
     s.set_defaults(fn=cmd_approve)
 
-    s = sub.add_parser("revoke", help="undo an approval (same as approve --revoke)")
+    s = add("revoke", help="undo an approval (same as approve --revoke)")
     s.add_argument("edge")
     s.add_argument("--node")
     s.add_argument("--not-commit", action="store_true", help="only withdraw the not-a-commit-point declaration")
     s.set_defaults(fn=cmd_revoke)
 
-    s = sub.add_parser("pending", help="list promoted edges waiting on operator approval")
+    s = add("pending", help="list promoted edges waiting on operator approval")
     s.add_argument("--family")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_pending)
 
-    s = sub.add_parser("explain", help="per-step timeline of one run: who decided each step and why")
+    s = add("explain", help="per-step timeline of one run: who decided each step and why")
     s.add_argument("run_id", help="run id, unique prefix, or 'latest'")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_explain)
 
-    s = sub.add_parser("prune", help="evict cold nodes and old compaction decisions")
+    s = add("prune", help="evict cold nodes and old compaction decisions")
     s.add_argument("--days", type=float)
     s.add_argument("--min-hits", type=int)
     s.add_argument("--compact-days", type=float, help="compaction retention (default: compact_retention_days; 0 = keep)")
     s.add_argument("--dry-run", action="store_true")
     s.set_defaults(fn=cmd_prune)
 
-    s = sub.add_parser("export", help="export the tree")
+    s = add("export", help="export the tree")
     s.add_argument("--format", choices=["html", "mermaid", "skills"], default="html")
     s.add_argument("--out")
     s.add_argument("--family")
     s.set_defaults(fn=cmd_export)
 
-    s = sub.add_parser("build", help="rebuild trees from the trace log")
+    s = add("build", help="rebuild trees from the trace log")
     s.add_argument("--family")
     s.set_defaults(fn=cmd_build)
 
-    s = sub.add_parser("stats", help="replay vs frontier counts")
+    s = add("stats", help="replay vs frontier counts")
     s.add_argument("--family")
     s.set_defaults(fn=cmd_stats)
 

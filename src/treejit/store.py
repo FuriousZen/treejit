@@ -94,9 +94,15 @@ class Store:
         cols = {r["name"] for r in self.db.execute("PRAGMA table_info(requests)").fetchall()}
         if "compacted_chars" not in cols:
             self.db.execute("ALTER TABLE requests ADD COLUMN compacted_chars INTEGER DEFAULT 0")
+        if "at_step" not in cols:  # steps in the episode when the request was decided (explain's ordering)
+            self.db.execute("ALTER TABLE requests ADD COLUMN at_step INTEGER")
         cols = {r["name"] for r in self.db.execute("PRAGMA table_info(runs)").fetchall()}
         if "ended_after" not in cols:
             self.db.execute("ALTER TABLE runs ADD COLUMN ended_after INTEGER")
+        if "inherited" not in cols:
+            # steps copied from a finished run this one forks (a conversation that went on after its
+            # outcome): context for the later steps, not new evidence
+            self.db.execute("ALTER TABLE runs ADD COLUMN inherited INTEGER DEFAULT 0")
         cols = {r["name"] for r in self.db.execute("PRAGMA table_info(nodes)").fetchall()}
         if "n_end" not in cols:
             self.db.execute("ALTER TABLE nodes ADD COLUMN n_end INTEGER DEFAULT 0")
@@ -134,12 +140,12 @@ class Store:
         return _Tx(self)
 
     # -------------------------------------------------------------- runs & steps
-    def upsert_run(self, run_id: str, family: str, task: str, task_hash: str) -> None:
+    def upsert_run(self, run_id: str, family: str, task: str, task_hash: str, inherited: int = 0) -> None:
         t = now()
         self.x(
-            "INSERT INTO runs(id, family, task, task_hash, created, updated) VALUES(?,?,?,?,?,?) "
+            "INSERT INTO runs(id, family, task, task_hash, created, updated, inherited) VALUES(?,?,?,?,?,?,?) "
             "ON CONFLICT(id) DO UPDATE SET updated=excluded.updated",
-            (run_id, family, task, task_hash, t, t),
+            (run_id, family, task, task_hash, t, t, inherited),
         )
 
     def run(self, run_id: str) -> sqlite3.Row | None:
