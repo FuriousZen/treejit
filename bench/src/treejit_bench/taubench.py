@@ -43,6 +43,8 @@ import types
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from treejit.subcalls import answer_content, subcall_tool
+
 from .runner import TaskResult, _account, _compacted, _fresh_jit, _side_exits, _snap, record_outcome
 from .sim import UsageModel, _history, _match_proposal
 
@@ -255,20 +257,21 @@ class OracleAgent:
         return None
 
     def __call__(self, body: dict) -> dict:
-        forced = (body.get("tool_choice") or {}).get("name", "")
+        forced = subcall_tool(body)
         msgs = body["messages"]
-        if forced.startswith("treejit_"):
+        if forced:
             self.small_calls += 1
             try:
                 ans = self._subcall_answer(msgs[0]["content"], forced)
             except Exception:  # a confused model: nothing useful
                 ans = {"not_this_step": True} if forced == "treejit_fill" else {"choice": 0}
-            content = [{"type": "tool_use", "id": f"toolu_{self.rng.randrange(16 ** 20):020x}", "name": forced, "input": ans}]
-            chars = len(body.get("system", "")) + len(json.dumps(body.get("tools", []))) + len(json.dumps(msgs))
+            content = answer_content(body, ans, f"toolu_{self.rng.randrange(16 ** 20):020x}")
+            chars = (len(body.get("system", "")) + len(json.dumps(body.get("tools", []))) + len(json.dumps(msgs))
+                     + (len(json.dumps(body["output_config"])) if "output_config" in body else 0))
             usage = {"input_tokens": chars // 4, "output_tokens": len(json.dumps(content)) // 4 + 10}
             self.small_tokens[0] += usage["input_tokens"]
             self.small_tokens[1] += usage["output_tokens"]
-            return _message(content, "tool_use", usage)
+            return _message(content, content[0]["type"] == "tool_use" and "tool_use" or "end_turn", usage)
         self.calls += 1
         act = self.next_action(_history(msgs))
         if act is None:
@@ -346,9 +349,9 @@ class ClaudeAgent:
         return body
 
     def _create(self, **kw: Any) -> Any:
-        forced = (kw.get("tool_choice") or {}).get("name", "")
+        forced = subcall_tool(kw)
         resp = self.client.messages.create(**kw)
-        if forced.startswith("treejit_"):
+        if forced:
             u = _to_dict(resp).get("usage") or {}
             self.small_calls += 1
             self.small_tokens[0] += sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))

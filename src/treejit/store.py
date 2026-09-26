@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS evictions(node TEXT PRIMARY KEY, ts REAL);
 CREATE TABLE IF NOT EXISTS hits(node TEXT PRIMARY KEY, hits INTEGER, last_hit REAL);
 CREATE TABLE IF NOT EXISTS compactions(call_id TEXT PRIMARY KEY, obs_hash TEXT, digest TEXT, saved INTEGER, ts REAL);
 CREATE TABLE IF NOT EXISTS compact_convs(conv TEXT PRIMARY KEY, last_fwd REAL);
+CREATE TABLE IF NOT EXISTS hints(anchor TEXT PRIMARY KEY, pos INTEGER, text TEXT, ts REAL);
 """
 
 OBS_CAP = 64 * 1024
@@ -239,6 +240,30 @@ class Store:
             if not dry_run:
                 self.db.execute("DELETE FROM compact_convs WHERE last_fwd < ?", (cutoff,))
         return int(n)
+
+    # -------------------------------------------------------------- sticky frontier hints
+    def hints(self, anchors: list[str]) -> dict[str, str]:
+        """{anchor: hint text} for history positions a hint was given after (see compaction.sticky_hints)."""
+        out: dict[str, str] = {}
+        for i in range(0, len(anchors), 500):
+            chunk = anchors[i : i + 500]
+            for r in self.q(f"SELECT anchor, text FROM hints WHERE anchor IN ({','.join('?' * len(chunk))})", chunk):
+                out[r["anchor"]] = r["text"]
+        return out
+
+    def save_hint(self, anchor: str, pos: int, text: str) -> None:
+        """The first hint given at a position wins (a conversation re-sent with the same prefix gets it too)."""
+        self.x("INSERT OR IGNORE INTO hints(anchor, pos, text, ts) VALUES(?,?,?,?)", (anchor, pos, text, now()))
+
+    def touch_hints(self, anchors: list[str], t: float) -> None:
+        for i in range(0, len(anchors), 500):
+            chunk = anchors[i : i + 500]
+            self.x(f"UPDATE hints SET ts=? WHERE anchor IN ({','.join('?' * len(chunk))})", (t, *chunk))
+
+    def prune_hints(self, cutoff: float) -> int:
+        """Drop hints not re-sent since `cutoff` (a conversation idle that long has a cold cache)."""
+        with self.lock:
+            return int(self.db.execute("DELETE FROM hints WHERE ts < ?", (cutoff,)).rowcount or 0)
 
     # -------------------------------------------------------------- operator state
     def pins(self) -> set[tuple[str, str]]:

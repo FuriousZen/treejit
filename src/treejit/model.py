@@ -119,6 +119,7 @@ class NormRequest:
     episode: Episode
     raw: dict
     thinking: bool = False
+    passthrough: str = ""  # why the request is forwarded untouched and unrecorded (e.g. "stateful")
 
 
 @dataclass

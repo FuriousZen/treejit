@@ -1,8 +1,8 @@
 """Inline mode: `treejit.wrap(client)` for harnesses you own, and for tests.
 
 Works with the Anthropic SDK (`client.messages.create`), the OpenAI SDK
-(`client.chat.completions.create`), or any plain callable `fn(body) -> dict`
-(pass dialect="anthropic"|"openai").
+(`client.chat.completions.create` and `client.responses.create`), or any plain
+callable `fn(body) -> dict` (pass dialect="anthropic"|"openai"|"responses").
 
 Streaming (`stream=True`) goes through the engine too. A replay returns a
 `ReplayStream` of events built from the replay SSE (SDK event models when the
@@ -53,6 +53,10 @@ def _as_sdk(proto: Any, data: dict) -> Any:
             from openai.types.chat import ChatCompletion  # type: ignore
 
             return ChatCompletion.model_validate(data)
+        if proto == "responses":
+            from openai.types.responses import Response  # type: ignore
+
+            return Response.model_validate(data)
     except Exception:  # SDK missing or schema drift: fall back to the plain dict
         pass
     return data
@@ -62,15 +66,19 @@ _EVENT_ADAPTERS: dict[str, Any] = {}
 
 
 def _event_obj(dialect: str, data: dict) -> Any:
-    """One stream event as the SDK's model (RawMessageStreamEvent / ChatCompletionChunk), else the dict."""
+    """One stream event as the SDK's model (RawMessageStreamEvent / ChatCompletionChunk /
+    ResponseStreamEvent), else the dict."""
     try:
-        if dialect == "anthropic":
+        if dialect in ("anthropic", "responses"):
             ta = _EVENT_ADAPTERS.get(dialect)
             if ta is None:
-                from anthropic.types import RawMessageStreamEvent  # type: ignore
                 from pydantic import TypeAdapter
 
-                ta = _EVENT_ADAPTERS[dialect] = TypeAdapter(RawMessageStreamEvent)
+                if dialect == "anthropic":
+                    from anthropic.types import RawMessageStreamEvent as Event  # type: ignore
+                else:
+                    from openai.types.responses import ResponseStreamEvent as Event  # type: ignore
+                ta = _EVENT_ADAPTERS[dialect] = TypeAdapter(Event)
             return ta.validate_python(data)
         if dialect == "openai":
             from openai.types.chat import ChatCompletionChunk  # type: ignore
@@ -426,9 +434,9 @@ class _Ns:
 
 
 class Wrapped:
-    """Proxy object exposing the wrapped create() at the usual SDK path."""
+    """Proxy object exposing the wrapped create() at the usual SDK path(s)."""
 
-    def __init__(self, client: Any, create: _Create) -> None:
+    def __init__(self, client: Any, create: _Create, responses: _Create | None = None) -> None:
         self._client = client
         self._create = create
         if create.dialect == "anthropic" and create.sdk:
@@ -436,6 +444,9 @@ class Wrapped:
         elif create.dialect == "openai" and create.sdk:
             chat = client.chat
             self.chat = _Ns(chat, completions=_Ns(chat.completions, create=create))
+        responses = create if create.dialect == "responses" else responses
+        if responses is not None and responses.sdk:
+            self.responses = _Ns(client.responses, create=responses)
 
     def __call__(self, body: dict | None = None, **kwargs: Any) -> Any:
         return self._create(body, **kwargs)
@@ -455,11 +466,16 @@ def wrap_client(jit: Any, client: Any, run_id: str | None = None, dialect: str |
         return Wrapped(client, _Create(jit, messages.create, "anthropic", run_id, True))
     chat = getattr(client, "chat", None)
     completions = getattr(chat, "completions", None) if chat is not None else None
+    responses = getattr(client, "responses", None)
+    resp = (_Create(jit, responses.create, "responses", run_id, True)
+            if responses is not None and callable(getattr(responses, "create", None)) else None)
     if dialect in (None, "openai") and completions is not None and callable(getattr(completions, "create", None)):
-        return Wrapped(client, _Create(jit, completions.create, "openai", run_id, True))
+        return Wrapped(client, _Create(jit, completions.create, "openai", run_id, True), resp)
+    if dialect in (None, "responses") and resp is not None:
+        return Wrapped(client, resp)
     if callable(client):
         if dialect not in dialects.DIALECTS:
-            raise ValueError("wrapping a plain callable needs dialect='anthropic' or 'openai'")
+            raise ValueError("wrapping a plain callable needs dialect='anthropic', 'openai' or 'responses'")
         return Wrapped(client, _Create(jit, client, dialect, run_id, False))
     raise TypeError("wrap() expects an Anthropic/OpenAI client or a callable body -> response dict")
 

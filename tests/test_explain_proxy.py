@@ -14,6 +14,7 @@ from conftest import SYSTEM, TOOLS, text_msg, tool_msg
 from treejit import TreeJIT, operate
 from treejit.cli import main as cli
 from treejit.proxy import ProxyApp
+from treejit.subcalls import answer_content, subcall_tool
 from treejit_bench.runner import _execute, _fresh_jit, _upstream_app, parse_anthropic_sse
 from treejit_bench.sim import SimModel, make_task
 
@@ -35,11 +36,11 @@ def test_failed_first_step_subcall_joins_its_run():
     small = {"n": 0}
 
     def model(body):
-        forced = (body.get("tool_choice") or {}).get("name", "")
+        forced = subcall_tool(body)
         if forced == "treejit_choose":
             small["n"] += 1
-            return {"id": "m", "type": "message", "role": "assistant", "model": "x", "stop_reason": "tool_use",
-                    "content": [{"type": "tool_use", "id": f"toolu_s{small['n']:012d}", "name": forced, "input": {"choice": 0}}],
+            return {"id": "m", "type": "message", "role": "assistant", "model": "x", "stop_reason": "end_turn",
+                    "content": answer_content(body, {"choice": 0}, f"toolu_s{small['n']:012d}"),
                     "usage": {"input_tokens": 300, "output_tokens": 20}}
         msgs = body["messages"]
         task = msgs[0]["content"]

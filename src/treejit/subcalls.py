@@ -1,12 +1,26 @@
-"""T2/T3 subcalls: one small, forced-tool model call instead of a full frontier call.
+"""T2/T3 subcalls: one small, structured model call instead of a full frontier call.
 
   T3 fill    the next call is known except for some values; the model supplies only those
   T2 choose  the model picks among the node's known children (or 0 = "something else")
 
 The prompt is short and deterministic: the task, the calls made so far (arguments
 truncated), the last few tool results, and the call(s) with placeholders for holes.
-The full conversation is never sent. Output is structured by forcing a tool call
-(Anthropic `tool_choice: {"type": "tool"}`, OpenAI `tool_choice: {"type": "function"}`).
+The full conversation is never sent. How the answer is structured depends on the dialect
+(`Config.subcall_format`):
+
+  Anthropic   structured outputs (default, "json_schema"): `output_config.format` with a JSON
+              schema; the answer is a JSON text block. Forced tool use (`tool_choice` "tool"/"any")
+              returns a 400 on Claude Fable 5.1, Mythos 5.1 and Opus 5.5, so it is never sent to a
+              current model. "tool_auto" is the fallback shape: one strict tool, `tool_choice: auto`
+              and an explicit instruction (no call = failed subcall). "tool" (forced) is kept only
+              for legacy models without structured outputs (claude-3*, claude-2*, claude-instant).
+              `thinking` is never sent (it can't be disabled on the always-thinking models); on
+              models that take `output_config.effort` the subcall asks for `Config.subcall_effort`
+              ("low"), and on models that think by default max_tokens leaves room for the thinking.
+  OpenAI      a forced function call (`tool_choice: {"type": "function", ...}`), Chat Completions
+              or Responses shape.
+
+Any answer that doesn't parse or doesn't fit the schema falls back to the T4 forward.
 """
 
 from __future__ import annotations
@@ -16,6 +30,7 @@ import re
 from typing import Any
 
 from .config import Config
+from .dialects import thinking_default_on
 from .model import NormRequest, ToolCall
 from .replay import Option, Subcall
 from .templates import Val, call_slots, cook, render
@@ -28,16 +43,69 @@ TASK_CHARS = 4000
 ARG_CHARS = 200
 MAX_STEPS = 30        # earlier calls shown (most recent)
 
-FILL_SYSTEM = (
+_FILL_BASE = (
     "You assist a tool-using agent. Its next tool call is already decided except for the <placeholders>. "
     "Give the value each placeholder should take, exactly as the agent would write it (plain text, no shell quoting). "
-    f"If this call is not the right next step, set not_this_step to true. Answer only by calling {FILL_TOOL}."
+    "If this call is not the right next step, set not_this_step to true."
 )
-CHOOSE_SYSTEM = (
+_CHOOSE_BASE = (
     "You assist a tool-using agent. Pick its next tool call from the numbered options, given the task and the "
     "latest tool results; answer 0 if none of them is right. If the option you pick has <placeholders>, also give "
-    f"their values in the fields o<N>_<placeholder> (plain text, no shell quoting). Answer only by calling {CHOOSE_TOOL}."
+    "their values in the fields o<N>_<placeholder> (plain text, no shell quoting)."
 )
+FILL_SYSTEM = f"{_FILL_BASE} Answer only by calling {FILL_TOOL}."
+CHOOSE_SYSTEM = f"{_CHOOSE_BASE} Answer only by calling {CHOOSE_TOOL}."
+# structured outputs (Anthropic default): the answer is the response text itself
+FILL_SYSTEM_JSON = f"{_FILL_BASE} Answer with the JSON object only ({FILL_TOOL})."
+CHOOSE_SYSTEM_JSON = f"{_CHOOSE_BASE} Answer with the JSON object only ({CHOOSE_TOOL})."
+# fallback without forced tool use: say it, and check a call was made (no call -> T4)
+FILL_SYSTEM_AUTO = f"{_FILL_BASE} You must answer by calling the {FILL_TOOL} tool exactly once, with no other text."
+CHOOSE_SYSTEM_AUTO = f"{_CHOOSE_BASE} You must answer by calling the {CHOOSE_TOOL} tool exactly once, with no other text."
+_SYSTEMS = {FILL_SYSTEM: FILL_TOOL, CHOOSE_SYSTEM: CHOOSE_TOOL, FILL_SYSTEM_JSON: FILL_TOOL,
+            CHOOSE_SYSTEM_JSON: CHOOSE_TOOL, FILL_SYSTEM_AUTO: FILL_TOOL, CHOOSE_SYSTEM_AUTO: CHOOSE_TOOL}
+
+FORMATS = ("auto", "json_schema", "tool_auto", "tool")
+# Anthropic models without structured outputs: the forced tool call is the only structured shape there
+_LEGACY_TOOL = re.compile(r"claude-(?:instant|2|3)(?:[-.]|$)")
+# models that take output_config.effort (Opus 4.5+, Sonnet 4.6+, Fable, Mythos); others 400 on it
+_EFFORT = re.compile(r"claude-(?:opus-4-[5-9]|opus-[5-9]|sonnet-4-[6-9]|sonnet-[5-9]|fable|mythos)")
+THINKING_MAX_TOKENS = 4096  # floor for max_tokens where thinking is on by default (it counts toward the cap)
+
+
+def anthropic_format(model: str, cfg: Config) -> str:
+    """The subcall shape for an Anthropic model: json_schema | tool_auto | tool."""
+    fmt = cfg.subcall_format if cfg.subcall_format in FORMATS else "auto"
+    if fmt == "auto":
+        return "tool" if _LEGACY_TOOL.search(model or "") else "json_schema"
+    return fmt
+
+
+def subcall_tool(body: dict) -> str:
+    """The treejit subcall a request body is (FILL_TOOL / CHOOSE_TOOL), or "" for any other request.
+    For fake models and harness-side accounting: works for every shape `build` produces."""
+    tc = body.get("tool_choice")
+    name = ""
+    if isinstance(tc, dict):
+        name = tc.get("name") or (tc.get("function") or {}).get("name") or ""
+    if name in (FILL_TOOL, CHOOSE_TOOL):
+        return name
+    system = body.get("system")
+    if isinstance(system, str) and system in _SYSTEMS:
+        return _SYSTEMS[system]
+    for m in (body.get("messages") or body.get("input") or [])[:1]:
+        if isinstance(m, dict) and m.get("role") in ("system", "developer") and m.get("content") in _SYSTEMS:
+            return _SYSTEMS[m["content"]]
+    instr = body.get("instructions")
+    return _SYSTEMS.get(instr, "") if isinstance(instr, str) else ""
+
+
+def answer_content(body: dict, answer: dict, tool_use_id: str = "toolu_treejit_sub") -> list[dict]:
+    """Anthropic response content answering subcall `body` with `answer` (for scripted models):
+    a JSON text block for structured outputs, a tool_use block for the tool shapes."""
+    name = subcall_tool(body)
+    if isinstance(body.get("output_config"), dict) and body["output_config"].get("format"):
+        return [{"type": "text", "text": json.dumps(answer)}]
+    return [{"type": "tool_use", "id": tool_use_id, "name": name, "input": answer}]
 
 
 def prop_names(slots: list[str]) -> dict[str, str]:
@@ -155,30 +223,104 @@ def build(dialect: str, sub: Subcall, req: NormRequest, cfg: Config) -> dict | N
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
                 "tools": [{"type": "function", "function": {"name": name, "description": desc, "parameters": schema}}],
                 "tool_choice": {"type": "function", "function": {"name": name}}}
-    return {"model": model, "max_tokens": cfg.subcall_max_tokens, "system": system,
-            "messages": [{"role": "user", "content": user}],
-            "tools": [{"name": name, "description": desc, "input_schema": schema}],
-            "tool_choice": {"type": "tool", "name": name}}
+    if dialect == "responses":
+        return {"model": model, "max_output_tokens": max(16, cfg.subcall_max_tokens), "instructions": system,
+                "input": [{"role": "user", "content": user}], "store": False, "parallel_tool_calls": False,
+                "tools": [{"type": "function", "name": name, "description": desc, "parameters": schema}],
+                "tool_choice": {"type": "function", "name": name}}
+    fmt = anthropic_format(model, cfg)
+    if fmt == "tool":  # legacy models only: forced tool use 400s on Fable 5.1 / Mythos 5.1 / Opus 5.5
+        return {"model": model, "max_tokens": cfg.subcall_max_tokens, "system": system,
+                "messages": [{"role": "user", "content": user}],
+                "tools": [{"name": name, "description": desc, "input_schema": schema}],
+                "tool_choice": {"type": "tool", "name": name}}
+    strict = strict_schema(schema)
+    out: dict = {"model": model, "max_tokens": cfg.subcall_max_tokens,
+                 "messages": [{"role": "user", "content": user}]}
+    if thinking_default_on(model):
+        out["max_tokens"] = max(cfg.subcall_max_tokens, THINKING_MAX_TOKENS)
+    oc: dict = {}
+    if fmt == "tool_auto":
+        out["system"] = FILL_SYSTEM_AUTO if sub.kind == "fill" else CHOOSE_SYSTEM_AUTO
+        out["tools"] = [{"name": name, "description": desc, "input_schema": strict, "strict": True}]
+        out["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
+    else:
+        out["system"] = FILL_SYSTEM_JSON if sub.kind == "fill" else CHOOSE_SYSTEM_JSON
+        oc["format"] = {"type": "json_schema", "schema": strict}
+    if cfg.subcall_effort and _EFFORT.search(model or ""):
+        oc["effort"] = cfg.subcall_effort
+    if oc:
+        out["output_config"] = oc
+    return out
+
+
+def strict_schema(schema: dict) -> dict:
+    """The subcall schema in the subset structured outputs / strict tools accept: every object has
+    `additionalProperties: false`, and numeric bounds become an enum (minimum/maximum are rejected)."""
+    props = {}
+    for k, p in schema["properties"].items():
+        p = dict(p)
+        lo, hi = p.pop("minimum", None), p.pop("maximum", None)
+        if p.get("type") == "integer" and lo is not None and hi is not None:
+            p["enum"] = list(range(int(lo), int(hi) + 1))
+        props[k] = p
+    return {"type": "object", "properties": props, "required": list(schema.get("required") or []),
+            "additionalProperties": False}
+
+
+def _json_text(text: str) -> Any:
+    """The JSON object in a structured-output text block (tolerating code fences and stray prose)."""
+    t = text.strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```[A-Za-z]*\s*|\s*```$", "", t)
+    try:
+        return json.loads(t)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    a, b = t.find("{"), t.rfind("}")
+    if 0 <= a < b:
+        try:
+            return json.loads(t[a : b + 1])
+        except (json.JSONDecodeError, ValueError):
+            return None
+    return None
 
 
 def tool_input(dialect: str, sub: Subcall, body: dict) -> dict | None:
-    """The forced tool call's arguments from the upstream response, or None."""
+    """The subcall's answer (the tool call's arguments, or the structured-output JSON), or None."""
     name = FILL_TOOL if sub.kind == "fill" else CHOOSE_TOOL
     if dialect == "openai":
         for ch in body.get("choices") or []:
             for tc in (ch.get("message") or {}).get("tool_calls") or []:
                 fn = tc.get("function") or {}
                 if fn.get("name") == name:
-                    try:
-                        args = json.loads(fn.get("arguments") or "")
-                    except (json.JSONDecodeError, TypeError):
-                        return None
-                    return args if isinstance(args, dict) else None
+                    return _args(fn.get("arguments"))
         return None
+    if dialect == "responses":
+        for item in body.get("output") or []:
+            if isinstance(item, dict) and item.get("type") == "function_call" and item.get("name") == name:
+                return _args(item.get("arguments"))
+        return None
+    texts = []
     for b in body.get("content") or []:
-        if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == name:
+        if not isinstance(b, dict):
+            continue
+        if b.get("type") == "tool_use" and b.get("name") == name:
             return b.get("input") if isinstance(b.get("input"), dict) else None
-    return None
+        if b.get("type") == "text":
+            texts.append(b.get("text") or "")
+    if not texts:
+        return None  # no call, no text (tool_auto without a call, a refusal, thinking only): T4
+    out = _json_text("".join(texts))
+    return out if isinstance(out, dict) else None
+
+
+def _args(raw: Any) -> dict | None:
+    try:
+        args = json.loads(raw or "") if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return args if isinstance(args, dict) else None
 
 
 def _values(opt: Option, out: dict, prefix: str = "") -> dict[str, Val] | None:
