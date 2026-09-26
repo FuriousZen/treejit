@@ -34,7 +34,7 @@ The core (`src/treejit`, except `proxy.py`) uses only the standard library. Prox
 
 A simulated agent works a mixed stream of coding tasks (typo fix / version bump / delete module, each with a flaky-test branch) and tau-bench-style retail tasks (branching on order status). The tree starts empty. The simulated model sees only the conversation. It is stochastic (argument formatting varies, free-form commit messages), and it takes a known-bad shortcut 6% of the time. Observations are realistically sized: `Read` returns a 45–65-line file, `pytest -q` prints 150–420 tests as progress rows plus a warnings summary, and `git status` lists untracked build junk in about a third of the tasks.
 
-RESULTS_PLACEHOLDER
+> **Interim (after merging T2/T3, compaction and the operator CLI; the simulator was also made more realistic).** Seeds 0–2, edges approved, tasks 151–200: 1.00–1.02 full model calls + 0.28–0.92 small calls per task, 100% of tool calls served, 100% success vs 96% for the plain agent; compaction saves a further 3–10% of tokens. **Seed 3 regresses** (171/200 success vs 189 for the plain agent): a T1 decision list learned a task-word rule from too few runs and misroutes typo tasks. A fix is in progress; full tables will be regenerated after it.
 - Running the same stream through the real ASGI proxy with SSE streaming (`--via-proxy`) gives identical numbers.
 - The floor is one full model call per task, because the final answer is always generated.
 - In the simulation a small call costs about 45% of a full call's tokens (~450 vs ~1,080), because the simulated system prompt, tools and conversation are tiny. A real harness sends far more per call (Claude Code: tens of thousands of tokens), so the token column understates what T2/T3 save.
