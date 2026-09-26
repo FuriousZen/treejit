@@ -205,10 +205,16 @@ def materialize(view: TreeView, cfg: Config, opt: Option, filled: dict[str, Val]
     return args, ""
 
 
+def taint_of(calls: list[ToolCall], cfg: Config) -> str:
+    """Why these calls ended trust in the repository's git config ('' if none did)."""
+    return next((w for w in (repo_taint(c.name, c.args, cfg) for c in calls) if w), "")
+
+
 def option(view: TreeView, cfg: Config, ne: NodeEdge, S: Sources, holes_ok: bool,
-           borrow: list[NodeEdge] | None = None) -> tuple[Option | None, str]:
+           borrow: list[NodeEdge] | None = None, prior_taint: str = "") -> tuple[Option | None, str]:
     """Bind an edge's variables. Unbound slots become holes when holes_ok, else a reason to go to T4.
-    `borrow`: the same edge at more specific contexts, whose rules may bind what this one can't."""
+    `borrow`: the same edge at more specific contexts, whose rules may bind what this one can't.
+    `prior_taint`: taint from the conversation's earlier episodes (see decide)."""
     values: dict[str, Val] = {}
     holes = []
     for slot in list(ne.bindings) + [h for h in ne.holes if h not in ne.bindings]:
@@ -224,7 +230,7 @@ def option(view: TreeView, cfg: Config, ne: NodeEdge, S: Sources, holes_ok: bool
         else:
             holes.append(slot)
     opt = Option(ne, view.edges[ne.edge], values, holes)
-    opt.tainted = next((w for w in (repo_taint(c.name, c.args, cfg) for c in S.calls) if w), "")
+    opt.tainted = prior_taint or taint_of(S.calls, cfg)
     if holes:
         return (opt, "") if holes_ok else (None, f"unbound:{holes[0]}")
     opt.args, why = materialize(view, cfg, opt)
@@ -232,7 +238,7 @@ def option(view: TreeView, cfg: Config, ne: NodeEdge, S: Sources, holes_ok: bool
 
 
 def _alternatives(view: TreeView, cfg: Config, kids: list[NodeEdge], feats: dict | None, S: Sources,
-                  skip: str = "") -> list[Option]:
+                  skip: str = "", prior_taint: str = "") -> list[Option]:
     """Known children the model may pick at a T2 call: chosen before, usable, guard holds."""
     out = []
     for k in sorted(kids, key=lambda k: (-k.pass_n, -k.conf, k.edge)):
@@ -240,7 +246,7 @@ def _alternatives(view: TreeView, cfg: Config, kids: list[NodeEdge], feats: dict
             continue
         if feats is not None and k.guard and not guard_holds(k.guard, feats):
             continue
-        opt, _ = option(view, cfg, k, S, cfg.t3)
+        opt, _ = option(view, cfg, k, S, cfg.t3, prior_taint=prior_taint)
         if opt is not None:
             opt.conf = k.conf
             out.append(opt)
@@ -277,6 +283,9 @@ def decide(view: TreeView, cfg: Config, req: NormRequest, dialect: Dialect) -> P
         budget *= ne.conf if c is None else c
 
     words = task_words(ep.task)
+    # the repository is shared by the whole conversation: a call in an earlier episode (another task)
+    # that rewrote its git config taints this one too
+    prior_taint = taint_of(ep.prior_calls, cfg)
     calls = [s.call for s in steps]
     obs = [s.obs for s in steps]
     count = trail
@@ -324,7 +333,7 @@ def decide(view: TreeView, cfg: Config, req: NormRequest, dialect: Dialect) -> P
             if (why in ("ambiguous", "unproven_rule", "commit_contested") and first and cfg.t2 and nid
                     and count < cfg.hard_cap
                     and sum(1 for k in kids if k.pass_n > 0 and not k.tomb) >= (1 if why == "commit_contested" else 2)):
-                opts = _alternatives(view, cfg, kids, feats, S)[:MAX_OPTIONS]
+                opts = _alternatives(view, cfg, kids, feats, S, prior_taint=prior_taint)[:MAX_OPTIONS]
                 if sum(o.ne.purity for o in opts) >= MIN_COVER:
                     plan.sub = Subcall("choose", nid, used, opts, "commit" if why == "commit_contested" else "ambiguous")
             plan.reason = plan.reason or (why + (f"@{used}" if used else ""))
@@ -335,7 +344,7 @@ def decide(view: TreeView, cfg: Config, req: NormRequest, dialect: Dialect) -> P
         # passing instance) still apply. Without T3 those steps went to the model and fed them.
         borrow = [c for c in (view.child(n, ne.edge) for n in starved) if c is not None and c.live and not c.tomb] \
             if holes_ok else []
-        opt, why = option(view, cfg, ne, S, holes_ok, borrow)
+        opt, why = option(view, cfg, ne, S, holes_ok, borrow, prior_taint)
         if opt is None:
             plan.reason = plan.reason or why
             break
@@ -345,7 +354,7 @@ def decide(view: TreeView, cfg: Config, req: NormRequest, dialect: Dialect) -> P
             break
         if budget * conf < cfg.theta:
             if first and cfg.t2:
-                alts = _alternatives(view, cfg, kids, feats, S, skip=ne.edge)
+                alts = _alternatives(view, cfg, kids, feats, S, skip=ne.edge, prior_taint=prior_taint)
                 plan.sub = Subcall("choose", nid, used, [opt] + alts[: MAX_OPTIONS - 1], "budget")
             plan.reason = plan.reason or "budget"
             break

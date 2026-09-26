@@ -461,6 +461,66 @@ def _safe_assignment(word: str) -> bool:
     return name in _SAFE_VARS or name.startswith("LC_")
 
 
+# Variables that make a program run another program, load code, or read another config (which can name
+# one): setting them is a commit point (like `git -c diff.external=...`), so a T3 fill can't add one.
+_EXEC_VARS = re.compile(
+    r"GIT_\w*|\w*(EDITOR|PAGER|ASKPASS|_COMMAND|_PROGRAM|_CMD|PROXY|_proxy)|VISUAL|BROWSER|SHELL|PATH|IFS|ENV|"
+    r"BASH_ENV|BASH_FUNC_\S*|PROMPT_COMMAND|PS4|SHELLOPTS|BASHOPTS|LD_\w+|DYLD_\w+|LESSOPEN|LESSCLOSE|"
+    r"PYTHON(STARTUP|PATH|HOME|INSPECT|WARNINGS|USERBASE)|PERL5?(OPT|LIB|DB)|RUBY(OPT|LIB)|NODE_(OPTIONS|PATH)|"
+    r"JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|RUSTC\w*|CARGO_\w+|CC|CXX|MAKEFLAGS|HOME|XDG_CONFIG_\w+|ZDOTDIR|"
+    r"(NPM|npm|PIP|YARN|BUNDLE|GEM|UV)_\w+|SSH_AUTH_SOCK")
+
+
+def _exec_assignment(word: str) -> bool:
+    return not _safe_assignment(word) and bool(_EXEC_VARS.fullmatch(word.partition("=")[0]))
+
+
+# The other arguments of a shell tool (Claude Code `Bash`, Codex `shell`/`local_shell`, Gemini
+# `run_shell_command`, ...). `env` entries are `K=V` assignments in front of the command (the env rules
+# above apply); these don't change what the command does; escalation flags run it outside the sandbox
+# (never read-only, and a commit point so a fill can't turn one on); anything else is unknown: not
+# read-only.
+_ENV_KEY = "env"
+_NEUTRAL_ARGS = {"description", "timeout", "timeout_ms", "run_in_background", "workdir", "cwd", "directory",
+                 "working_directory", "justification"}
+_ESCALATION_ARGS = {"with_escalated_permissions", "dangerouslyDisableSandbox", "dangerously_disable_sandbox",
+                    "sandbox_permissions", "requires_approval", "user"}
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _env_words(args: dict) -> list[str] | None:
+    """A shell call's `env` as `K=V` words ([] if none, None if it isn't a plain string map)."""
+    env = args.get(_ENV_KEY)
+    if env is None:
+        return []
+    if not isinstance(env, dict):
+        return None
+    out = []
+    for k, v in env.items():
+        if not (isinstance(k, str) and _ENV_NAME.fullmatch(k)) or isinstance(v, bool) or not isinstance(v, (str, int, float)):
+            return None
+        out.append(f"{k}={v}")
+    return out
+
+
+def _escalated(args: dict) -> str:
+    """The escalation argument a shell call sets ('' if none)."""
+    for k in _ESCALATION_ARGS:
+        v = args.get(k)
+        if v not in (None, False, "", 0, "use_default"):
+            return k
+    return ""
+
+
+def _shell_extras_readonly(args: dict) -> bool:
+    """A shell call's arguments besides its command leave it read-only (see _NEUTRAL_ARGS)."""
+    env = _env_words(args)
+    if env is None or not all(_safe_assignment(w) for w in env) or _escalated(args):
+        return False
+    known = _NEUTRAL_ARGS | _ESCALATION_ARGS | {_ENV_KEY}
+    return all(shell_text(k, v) is not None or k in known for k, v in args.items())
+
+
 def _commands(cmd: str, toks: list | None = None) -> list[tuple[list[str], list[str], bool]]:
     """Per simple command: cooked words and their raw text (redirections and their targets removed),
     and whether every redirection only reads, duplicates a descriptor, or writes to /dev/null."""
@@ -547,7 +607,7 @@ def _shell_args(args: dict) -> list[str]:
 def is_readonly(tool: str, args: dict, cfg: Config) -> bool:
     shell = _shell_args(args)
     if tool in cfg.shell_tools or (shell and not _match(tool, cfg.replay_tools)):
-        return bool(shell) and all(shell_readonly(c, cfg) for c in shell)
+        return bool(shell) and all(shell_readonly(c, cfg) for c in shell) and _shell_extras_readonly(args)
     return _match(tool, cfg.replay_tools)
 
 
@@ -1124,6 +1184,11 @@ def _reasons(cmd: str, ctx: _Ctx, out: list[str]) -> None:
     for words, raws, ro in cmds:
         if not ro:
             p = program_index(words, raws)[0]
+            # `GIT_EXTERNAL_DIFF=x git diff`, `env LD_PRELOAD=x ls`, `export GIT_SSH_COMMAND=x`
+            sets = [w for w in words[:p] if _ASSIGN.match(w)]
+            if p < len(words) and words[p] in ("export", "declare", "typeset", "readonly", "local"):
+                sets += [w for w in words[p + 1 :] if _ASSIGN.match(w)]
+            out += [f"env {w.partition('=')[0]}" for w in sets if _exec_assignment(w)]
             out += _prog_reasons(words, raws, p, ctx)
             # a wrapper we don't model may still run a known commit command: `mywrap git push`
             names = [w.rsplit("/", 1)[-1] for w in words]
@@ -1139,7 +1204,15 @@ def commit_reason(tool: str, args: dict, cfg: Config) -> str:
     out = [f"tool {p}" for p in cfg.commit_tools if fnmatch.fnmatchcase(tool, p)][:1]
     pats = [p.split() for p in cfg.commit_commands if p.split()]
     ctx = _Ctx(pats, {p[0] for p in pats})
-    for v in _shell_args(args):
+    shell = _shell_args(args)
+    if shell:
+        # a shell call's `env` entries are assignments in front of its command, and escalation runs it
+        # outside the sandbox: a fill can't add either (materialize compares reasons)
+        env = _env_words(args)
+        out += ["env (not a string map)"] if env is None else [f"env {w.partition('=')[0]}" for w in env if _exec_assignment(w)]
+        if _escalated(args):
+            out.append(f"escalated ({_escalated(args)})")
+    for v in shell:
         _reasons(v, ctx, out)
     return "; ".join(dict.fromkeys(out))
 

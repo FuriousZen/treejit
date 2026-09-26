@@ -528,21 +528,27 @@ def test_cli_prune_and_opportunistic_pruning(tmp_path, capsys):
     jit.store.x("UPDATE runs SET updated = updated - ?", (10 * 86400,))
     jit.close()
     cli(["--db", db, "prune", "--dry-run"])
+    assert "compaction decision" not in capsys.readouterr().out, "decisions are kept unless asked"
+    cli(["--db", db, "prune"])
+    assert "compaction decision" not in capsys.readouterr().out
+    cli(["--db", db, "prune", "--compact-days", "7", "--dry-run"])
     assert f"would remove {total} compaction decision(s)" in capsys.readouterr().out
     cli(["--db", db, "prune", "--compact-days", "30"])
     assert "removed 0 compaction" in capsys.readouterr().out
-    cli(["--db", db, "prune"])                        # compact_retention_days = 7
+    cli(["--db", db, "prune", "--compact-days", "7"])
     assert f"removed {total} compaction" in capsys.readouterr().out
     jit = TreeJIT(db, compact=True, theta=0.0)
     assert jit.store.q1("SELECT COUNT(*) n FROM compactions")["n"] == 0
-    # opportunistic: the forward path prunes at most once an hour
+    # opportunistic (the forward path, at most once an hour): only epoch-mode forward times, never decisions
     jit.store.save_compactions([("toolu_tj_x_ff00", "h", None, 0)])
     jit.store.x("UPDATE compactions SET ts = ts - ?", (10 * 86400,))
+    jit.store.touch_conversation("toolu_old", now() - 10 * 86400)
     assert compaction.maybe_prune(jit.store, jit.cfg, now()) == 1
-    jit.store.save_compactions([("toolu_tj_y_ff00", "h", None, 0)])
-    jit.store.x("UPDATE compactions SET ts = ts - ?", (10 * 86400,))
+    assert jit.store.q1("SELECT COUNT(*) n FROM compactions")["n"] == 1, "a resumed conversation still needs it"
+    jit.store.touch_conversation("toolu_old2", now() - 10 * 86400)
     assert compaction.maybe_prune(jit.store, jit.cfg, now()) == 0, "not again within the hour"
     assert compaction.maybe_prune(jit.store, jit.cfg, now() + 3601) == 1
     jit.cfg.compact_retention_days = 0
+    jit.store.touch_conversation("toolu_old3", now() - 10 * 86400)
     assert compaction.maybe_prune(jit.store, jit.cfg, now() + 10 ** 6) == 0, "0 = keep forever"
     jit.close()

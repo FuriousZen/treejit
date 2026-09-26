@@ -133,17 +133,18 @@ def test_sticky_hints_openai_and_responses(jit):
     assert strict_append_only([b1, b2], key="input") == []
 
 
-def test_hints_are_pruned_when_idle(tmp_path):
+def test_every_forwarded_position_is_decided(tmp_path):
+    """Each forward records "no hint" at every position of its history without a decision (see
+    test_seams for why); hints are never pruned by age (a resumed conversation needs them)."""
     jit = TreeJIT(str(tmp_path / "h.db"))
     d = dialect("anthropic")
     r = d.parse_request(_body(_conv(1)))
     compaction.sticky_hints(jit.store, d, r, r.raw, "H")
-    assert jit.store.q1("SELECT COUNT(*) n FROM hints")["n"] == 1
-    jit.store.x("UPDATE hints SET ts=0")
-    jit.store._hint_prune_at = 0.0
+    rows = jit.store.q("SELECT pos, text FROM hints ORDER BY pos")
+    assert [(x["pos"], x["text"]) for x in rows] == [(0, None), (1, None), (2, "H")]
     r2 = d.parse_request(_body(_conv(2)))
-    compaction.sticky_hints(jit.store, d, r2, r2.raw, None, retention_days=7)
-    assert jit.store.q1("SELECT COUNT(*) n FROM hints")["n"] == 0
+    compaction.sticky_hints(jit.store, d, r2, r2.raw, None)
+    assert jit.store.q1("SELECT COUNT(*) n FROM hints")["n"] == 5
     jit.close()
 
 

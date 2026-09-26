@@ -15,7 +15,8 @@ from .util import now
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS families(
   id TEXT PRIMARY KEY, tools_hash TEXT, prefix TEXT, dialect TEXT,
-  created REAL, updated REAL, built_at REAL DEFAULT 0, dirty INTEGER DEFAULT 1);
+  created REAL, updated REAL, built_at REAL DEFAULT 0, dirty INTEGER DEFAULT 1,
+  n_members INTEGER DEFAULT 0, legacy_prefix TEXT, gen INTEGER DEFAULT 0, tree_version INTEGER DEFAULT 0);
 CREATE INDEX IF NOT EXISTS families_tools ON families(tools_hash);
 CREATE TABLE IF NOT EXISTS family_lines(
   family TEXT, line TEXT, n INTEGER, chars INTEGER, text TEXT, pos INTEGER, PRIMARY KEY(family, line));
@@ -63,9 +64,16 @@ CREATE TABLE IF NOT EXISTS hits(node TEXT PRIMARY KEY, hits INTEGER, last_hit RE
 CREATE TABLE IF NOT EXISTS compactions(call_id TEXT PRIMARY KEY, obs_hash TEXT, digest TEXT, saved INTEGER, ts REAL);
 CREATE TABLE IF NOT EXISTS compact_convs(conv TEXT PRIMARY KEY, last_fwd REAL);
 CREATE TABLE IF NOT EXISTS hints(anchor TEXT PRIMARY KEY, pos INTEGER, text TEXT, ts REAL);
+CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v INTEGER);
+INSERT OR IGNORE INTO meta(k, v) VALUES('op_gen', 0);
 """
 
 OBS_CAP = 64 * 1024
+# Version of what a build writes (tree tables and the policy verdicts baked into them). A family whose
+# tree was built under another version is served as an empty tree (every request goes to the model)
+# until it is rebuilt; bump this when the builder's output or the replay policy changes meaning.
+TREE_VERSION = 2
+OPERATOR_TABLES = ("approvals", "not_commit", "pins", "evictions")
 
 
 class Store:
@@ -115,6 +123,21 @@ class Store:
             self.db.execute("ALTER TABLE families ADD COLUMN n_members INTEGER DEFAULT 0")
         if "legacy_prefix" not in cols:
             self.db.execute("ALTER TABLE families ADD COLUMN legacy_prefix TEXT")
+        if "gen" not in cols:
+            self.db.execute("ALTER TABLE families ADD COLUMN gen INTEGER DEFAULT 0")
+        if "tree_version" not in cols:
+            self.db.execute("ALTER TABLE families ADD COLUMN tree_version INTEGER DEFAULT 0")
+        # Generations (see builder.build_family): every write to operator state bumps meta.op_gen and
+        # every `dirty=1` bumps the family's gen, whoever writes it (this process, the CLI, a test's
+        # raw SQL), so a build that read older state never commits over newer state.
+        for table in OPERATOR_TABLES:
+            for op in ("INSERT", "UPDATE", "DELETE"):
+                self.db.execute(f"CREATE TRIGGER IF NOT EXISTS op_gen_{table}_{op.lower()} AFTER {op} ON {table} "
+                                "BEGIN UPDATE meta SET v=v+1 WHERE k='op_gen'; END")
+        self.db.execute("CREATE TRIGGER IF NOT EXISTS families_gen AFTER UPDATE OF dirty ON families WHEN NEW.dirty=1 "
+                        "BEGIN UPDATE families SET gen=gen+1 WHERE id=NEW.id; END")
+        # a tree built by an older treejit (other policy, other columns) is never served: rebuild it first
+        self.db.execute("UPDATE families SET dirty=1 WHERE dirty=0 AND COALESCE(tree_version, 0) <> ?", (TREE_VERSION,))
 
     def close(self) -> None:
         self.db.close()
@@ -137,8 +160,15 @@ class Store:
         with self.lock:
             self.db.executemany(sql, rows)
 
-    def transaction(self) -> "_Tx":
-        return _Tx(self)
+    def transaction(self, immediate: bool = False) -> "_Tx":
+        """immediate: take the write lock up front (a read-check-write that must not interleave with
+        another connection's write)."""
+        return _Tx(self, immediate)
+
+    def op_gen(self) -> int:
+        """Generation of the operator state (approvals, not_commit, pins, evictions); see _migrate."""
+        r = self.q1("SELECT v FROM meta WHERE k='op_gen'")
+        return int(r["v"]) if r is not None else 0
 
     # -------------------------------------------------------------- runs & steps
     def upsert_run(self, run_id: str, family: str, task: str, task_hash: str, inherited: int = 0) -> None:
@@ -228,7 +258,12 @@ class Store:
 
     def prune_compactions(self, cutoff: float, dry_run: bool = False) -> int:
         """Delete compaction rows written before `cutoff` unless one of their call ids is a step of a
-        run updated since (live runs keep theirs; rows of old runs and orphans go). Returns the count."""
+        run updated since (live runs keep theirs; rows of old runs and orphans go). Returns the count.
+
+        Only `treejit prune --compact-days N` calls this: a conversation resumed after its rows are gone
+        has them reconstructed from the conversation and the tree of that day, which can differ from
+        what it was sent (a message the model already saw changes: prompt cache, preserved thinking).
+        The operator decides when old conversations are dead; nothing prunes them by age on its own."""
         keep = ("SELECT s.call_id FROM steps s JOIN runs r ON r.id = s.run_id "
                 "WHERE r.updated >= ? AND s.call_id IS NOT NULL")
         where = f"ts < ? AND call_id NOT IN ({keep})"
@@ -238,32 +273,29 @@ class Store:
                 with self.transaction():
                     self.db.execute(f"DELETE FROM compactions WHERE {where}", (cutoff, cutoff))
             if not dry_run:
-                self.db.execute("DELETE FROM compact_convs WHERE last_fwd < ?", (cutoff,))
+                self.prune_conversations(cutoff)
         return int(n)
 
+    def prune_conversations(self, cutoff: float) -> int:
+        """Forget epoch-mode forward times older than `cutoff` (a conversation without one counts as warm)."""
+        with self.lock:
+            return int(self.db.execute("DELETE FROM compact_convs WHERE last_fwd < ?", (cutoff,)).rowcount or 0)
+
     # -------------------------------------------------------------- sticky frontier hints
-    def hints(self, anchors: list[str]) -> dict[str, str]:
-        """{anchor: hint text} for history positions a hint was given after (see compaction.sticky_hints)."""
-        out: dict[str, str] = {}
+    def hints(self, anchors: list[str]) -> dict[str, str | None]:
+        """{anchor: hint text, or None for "no hint"} for the history positions already decided
+        (see compaction.sticky_hints)."""
+        out: dict[str, str | None] = {}
         for i in range(0, len(anchors), 500):
             chunk = anchors[i : i + 500]
             for r in self.q(f"SELECT anchor, text FROM hints WHERE anchor IN ({','.join('?' * len(chunk))})", chunk):
                 out[r["anchor"]] = r["text"]
         return out
 
-    def save_hint(self, anchor: str, pos: int, text: str) -> None:
-        """The first hint given at a position wins (a conversation re-sent with the same prefix gets it too)."""
-        self.x("INSERT OR IGNORE INTO hints(anchor, pos, text, ts) VALUES(?,?,?,?)", (anchor, pos, text, now()))
-
-    def touch_hints(self, anchors: list[str], t: float) -> None:
-        for i in range(0, len(anchors), 500):
-            chunk = anchors[i : i + 500]
-            self.x(f"UPDATE hints SET ts=? WHERE anchor IN ({','.join('?' * len(chunk))})", (t, *chunk))
-
-    def prune_hints(self, cutoff: float) -> int:
-        """Drop hints not re-sent since `cutoff` (a conversation idle that long has a cold cache)."""
-        with self.lock:
-            return int(self.db.execute("DELETE FROM hints WHERE ts < ?", (cutoff,)).rowcount or 0)
+    def save_hints(self, rows: list[tuple[str, int, str | None]]) -> None:
+        """rows: (anchor, pos, text or None for "no hint"). The first decision at a position wins."""
+        t = now()
+        self.xmany("INSERT OR IGNORE INTO hints(anchor, pos, text, ts) VALUES(?,?,?,?)", [(*r, t) for r in rows])
 
     # -------------------------------------------------------------- operator state
     def pins(self) -> set[tuple[str, str]]:
@@ -285,12 +317,17 @@ class Store:
 
 
 class _Tx:
-    def __init__(self, store: Store) -> None:
+    def __init__(self, store: Store, immediate: bool = False) -> None:
         self.store = store
+        self.immediate = immediate
 
     def __enter__(self) -> "_Tx":
         self.store.lock.acquire()
-        self.store.db.execute("BEGIN")
+        try:
+            self.store.db.execute("BEGIN IMMEDIATE" if self.immediate else "BEGIN")
+        except BaseException:
+            self.store.lock.release()
+            raise
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:

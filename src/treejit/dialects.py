@@ -15,7 +15,7 @@ import re
 import time
 from typing import Any
 
-from .model import REPLAY_MARK, USER, Episode, NormRequest, Observation, ResponseInfo, Step, ToolCall, Usage
+from .model import REPLAY_MARK, USER, Episode, NormRequest, Observation, ResponseInfo, Step, ToolCall, Usage, calls_sig
 from .util import h, rand_id, strip_reminders
 
 
@@ -216,6 +216,7 @@ def episode_of(events: list[tuple], mode: str = "auto") -> Episode:
             if text:
                 steps.append(Step(ToolCall(f"user_{e[2]}_{h(text, n=8)}", f"{USER}:{kinds[k]}", {}), Observation(text)))
     ep = Episode(task, steps, index=max(0, len(bounds) - 1))
+    ep.prior_calls = [c for k in range(0, max(start, 0)) if evs[k][0] == "a" for c in evs[k][1]]
     first = next((e for e in evs if e[0] == "u"), None)
     ep.origin = clean_user_text(first[1]) if first is not None else ""
     for k, e in enumerate(evs):
@@ -223,6 +224,7 @@ def episode_of(events: list[tuple], mode: str = "auto") -> Episode:
             continue
         ep.anchor_ids = [c.id for c in e[1]]
         ep.anchor_text = " ".join(e[2].split())
+        ep.anchor_calls = calls_sig(e[1])
         if e[1]:
             res = next((x for x in evs[k + 1 :] if x[0] == "r" and x[1] == e[1][0].id), None)
             ep.anchor_salt = h(res[2].text, n=12) if res is not None else None

@@ -14,6 +14,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from .util import h
+
 REPLAY_MARK = "tj"  # replayed tool-call ids: toolu_tj_<node12>_<conf:02x><rand>[_<via>] (call_tj_... for OpenAI)
 # <via>: how a subcall-assisted step was produced. t3: holes filled by the model; t2: the model
 # chose among known children; ck: the model confirmed a step at a budget checkpoint.
@@ -49,6 +51,12 @@ class ToolCall:
     id: str
     name: str
     args: dict
+
+
+def calls_sig(calls: list[ToolCall]) -> str:
+    """Hash of a turn's calls without their ids (names and arguments), for telling apart conversations
+    whose call ids are weak (`call_0`) before their first observation arrives."""
+    return h("calls", [[c.name, c.args] for c in calls])
 
 
 @dataclass
@@ -107,6 +115,10 @@ class Episode:
     anchor_salt: str | None = None    # observation that followed it (for weak ids), None if not seen yet
     session: str = ""                 # harness session id (Claude Code metadata.user_id, OpenAI prompt_cache_key)
     user: str = ""                    # weaker per-user id (OpenAI `user`): mixed into the key, never enough alone
+    anchor_calls: str = ""            # hash of the first assistant turn's calls (names and arguments)
+    # every tool call of the conversation's earlier episodes: they ran on the same machine, so what they
+    # did to the repository (policy.repo_taint) still holds in this episode
+    prior_calls: list[ToolCall] = field(default_factory=list)
 
 
 @dataclass

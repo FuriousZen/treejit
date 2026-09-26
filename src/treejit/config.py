@@ -68,7 +68,7 @@ class Config:
     max_runs: int = 2000           # most recent runs per family a rebuild reads (bounds build time)
     # when an outcome rebuilds its family's tree: "sync" (before outcome() returns: inline mode, the
     # bench), "background" (a worker thread, coalescing per family; the live view is swapped when the
-    # build is done), "auto" (background under `treejit serve`, sync otherwise)
+    # build is done), "auto" (sync inline). `treejit serve` always rebuilds in the background.
     rebuild: str = "auto"
     # eviction
     evict_days: float = 30.0
@@ -83,7 +83,8 @@ class Config:
     compact_mode: str = "first_sight"  # first_sight (append-only) | epoch (+ re-compact when cold) | window (legacy)
     compact_epoch_ttl: float = 300.0   # epoch: re-compact when the conversation's last forward is older (s)
     compact_keep_path: bool = False    # also keep observations a path edge's bindings read (rule 3b)
-    compact_retention_days: float = 7.0  # compaction decisions of runs idle this long are pruned (0 = never)
+    compact_retention_days: float = 7.0  # epoch mode: forget forward times older than this (0 = never). Compaction
+    # decisions and hints are never pruned by age (a resumed conversation needs them): `treejit prune --compact-days`
     # tool policy
     replay_tools: list = field(default_factory=lambda: list(DEFAULT_REPLAY_TOOLS))
     shell_tools: list = field(default_factory=lambda: list(DEFAULT_SHELL_TOOLS))
