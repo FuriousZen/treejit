@@ -8,6 +8,7 @@ from conftest import calls_of, replayed_ids, run_agent
 from test_tiers import SubModel, approve_all
 
 from treejit import TreeJIT
+from treejit.features import excess_negatives, learn_decision_list, rule_resembles
 from treejit.model import ResponseInfo
 
 # ------------------------------------------------------------------ misrouted task-word rule (seed 3)
@@ -105,7 +106,7 @@ def test_task_word_rule_asks_before_replaying_until_proven(jit):
 def test_failed_replay_counts_against_the_rule_that_chose_it(tmp_path):
     # With the support requirement off, the rule replays into the typo task and the run fails.
     # That failure must count against the rule, so the next src/ typo task is not sent down `git rm` again.
-    jit = TreeJIT(str(tmp_path / "t.db"), task_rule_support=1)
+    jit = TreeJIT(str(tmp_path / "t.db"), task_rule_support=1, task_rule_similarity=0)
     model, repo = _misroute_setup(jit)
     [bad] = train(jit, model, ["fix the typo in src/net/c1.py"], repo, prefix="x", outcome=False)
     assert calls_of(bad)[1] == ("Bash", {"command": "git rm src/net/c1.py"}) and len(replayed_ids(bad)) == 2
@@ -113,6 +114,121 @@ def test_failed_replay_counts_against_the_rule_that_chose_it(tmp_path):
     [m] = train(jit, model, ["fix the typo in src/net/c2.py"], repo, prefix="y")
     assert calls_of(m)[1] == ("Read", {"file_path": "src/net/c2.py"}) and "src/net/c2.py" in repo.files
     jit.close()
+
+
+# ------------------------------------------------------------------ similarity gate on task-word rules
+# A chance rule can reach its support: the first 5 delete tasks all name src/ paths, the typo tasks so far
+# only docs/ (seed 3, task 13). Support alone then lets T1 replay `git rm` into the first src/ typo task.
+# The rule is trusted only on tasks that resemble its supporting examples (Jaccard of task words).
+
+DELETES = ["alpha", "bravo", "charlie", "delta", "echo"]
+
+
+def _proven_rule_setup(jit):
+    model = SubModel(kind_policy, pick_like_kind_policy)
+    repo = Repo()
+    repo.files |= {f"src/legacy/{n}.py": "old" for n in DELETES + ["foxtrot"]} | {"src/net/timeparse.py": "recieve"}
+    jit.cfg.t2 = False
+    tasks = [f"delete src/legacy/{n}.py" for n in DELETES]
+    tasks[1:1], tasks[3:3] = ["fix the typo in docs/guide.md"], ["fix the typo in docs/intro.md"]
+    train(jit, model, tasks, repo)
+    jit.cfg.t2 = True
+    approve_all(jit)
+    rules = src_rules(jit)
+    assert rules and all(r["support"] >= jit.cfg.task_rule_support for r in rules)  # proven by count alone
+    return model, repo
+
+
+def _tiers(jit, rid):
+    return [r["tier"] for r in jit.store.q("SELECT tier FROM requests WHERE run_id=? ORDER BY id", (rid,))]
+
+
+def test_proven_task_word_rule_asks_on_a_new_kind_of_task(jit):
+    model, repo = _proven_rule_setup(jit)
+    small = model.small
+    [m] = train(jit, model, ["fix the typo in src/net/timeparse.py"], repo, prefix="x")
+    # before the fix: T1 replayed `git rm src/net/timeparse.py`, deleting the file the task was about
+    assert calls_of(m)[1] == ("Read", {"file_path": "src/net/timeparse.py"}) and "src/net/timeparse.py" in repo.files
+    assert model.small - small == 1 and replayed_ids(m)[1].endswith("_t2")
+    assert not src_rules(jit)  # the pick is a counterexample
+
+
+def test_proven_task_word_rule_still_replays_on_its_own_kind(jit):
+    model, repo = _proven_rule_setup(jit)
+    small = model.small
+    [m] = train(jit, model, ["delete src/legacy/foxtrot.py"], repo, prefix="y")
+    assert calls_of(m)[1] == ("Bash", {"command": "git rm src/legacy/foxtrot.py"})
+    assert _tiers(jit, "y-0")[1] == "T1" and model.small == small
+
+
+# Negatives per input class (kNN), not per rule. After N passing T1 replays on class A ("delete P"), a
+# word-similar class B ("delete P carefully", which needs Read) used to need about N/4 failed runs before
+# the pooled excess showed, and the demotion then hit class A too. Failed replays keep their task-word
+# sets, and T1 needs the input to be closer to a supporting example than to any of them.
+
+def _class_policy(task, hist, body):
+    path = next(w for w in task.split() if "/" in w)
+    if not hist:
+        return "Bash", {"command": "git status"}
+    if len(hist) == 1:
+        a = task.startswith("delete") and "carefully" not in task
+        return ("Bash", {"command": f"git rm {path}"}) if a else ("Read", {"file_path": path})
+    return None
+
+
+def test_failures_count_per_input_class_not_per_rule(jit, monkeypatch):
+    monkeypatch.setitem(globals(), "kind_policy", _class_policy)  # pick_like_kind_policy answers T2 with it
+    model = SubModel(_class_policy, pick_like_kind_policy)
+    repo = Repo()
+    names = ["alpha", "bravo", "charlie", "delta", "echo", "golf", "hotel", "india", "juliet", "kilo", "lima", "mike",
+             "november", "oscar", "papa", "quebec", "romeo", "sierra", "tango", "uniform"]
+    a = [f"src/legacy/a{w}{k}.py" for k in range(2) for w in names][:26]
+    b = [f"src/legacy/b{w}.py" for w in names[:6]]
+    repo.files |= {p: "old" for p in a} | {p: "recieve" for p in b}
+    jit.cfg.t2 = False
+    train(jit, model, [f"delete {p}" for p in a[:5]] + ["fix the typo in docs/guide.md", "fix the typo in docs/intro.md"], repo)
+    jit.cfg.t2 = True
+    approve_all(jit)
+    for k, p in enumerate(a[5:25]):  # N = 20 passing T1 replays on class A
+        train(jit, model, [f"delete {p}"], repo, prefix=f"a{k}")
+        assert _tiers(jit, f"a{k}-0")[1] == "T1"
+    client = jit.wrap(model, dialect="anthropic")
+    failures = 0
+    for k, p in enumerate(b):
+        rid = f"b{k}"
+        run_agent(lambda body: client(body, extra_headers={"X-TreeJIT-Run": rid}), f"delete {p} carefully", repo)
+        ok = p in repo.files
+        jit.outcome(rid, "pass" if ok else "fail", None if ok else "target file was deleted")
+        if ok:
+            break
+        failures += 1
+    assert failures <= 1  # base: 6
+    small = model.small
+    train(jit, model, [f"delete {a[25]}"], repo, prefix="post")
+    assert _tiers(jit, "post-0")[1] == "T1" and model.small == small  # class A keeps T1 (base: T2)
+
+
+def test_excess_negatives_has_no_float_residue():
+    assert excess_negatives(1, 4, 0.8) == 0.0  # 1 - 0.2 * 5 was 2.2e-16
+    assert excess_negatives(2, 4, 0.8) > 0.0
+
+
+def test_task_word_rule_keeps_its_input_classes():
+    ex = [("rm", {}, "", {"delete", "src", f"f{i}"}) for i in range(3)] + [("rm", {}, "", {"delete", "src", "f0"})]
+    ex += [("read", {}, "", {"fix", "typo", "docs"}), ("read", {}, "", {"fix", "typo", "readme"})]
+    neg = [("rm", {}, "", {"delete", "src", "f9", "carefully"}), ("rm", {}, "", {"delete", "src", "f0"})]
+    ok = [("rm", {}, "", {"delete", "src", f"g{i}"}) for i in range(10)]  # passing replays: no excess
+    dl = learn_decision_list(ex, 0.8, negatives=neg, confirmed=ok, class_sets=True)
+    [rule] = [r for r in dl["rules"] if r["pred"][0] == "task" and r["edge"] == "rm"]
+    # distinct sets, cut to the words two supporting examples share (f1, f2 are one-off names; f0 recurs)
+    assert rule["ex"] == [["delete", "src"], ["delete", "f0", "src"]]
+    assert rule["nx"] == [["carefully", "delete", "f9", "src"]]  # a set that also passed is not held against it
+    assert rule_resembles(rule, {"delete", "src", "f7"}, 0.5)
+    assert not rule_resembles(rule, {"fix", "typo", "src"}, 0.5)                # a new kind of task
+    assert not rule_resembles(rule, {"delete", "src", "f8", "carefully"}, 0.5)  # closer to a failed one
+    assert rule_resembles(rule, {"fix", "typo", "src"}, 0)                      # gate off
+    assert all("ex" not in r for r in learn_decision_list(ex, 0.8)["rules"])     # only when asked (not case rules)
+    assert not rule_resembles({"pred": ["task", "src"]}, {"src"}, 0.5)           # no stored sets: not trusted
 
 
 # ------------------------------------------------------------------ END: where the model stops

@@ -45,20 +45,20 @@ A simulated agent works a mixed stream of coding tasks (typo fix / version bump 
 | treejit, edges approved | 151–200 | **1.06** | 0.90 | 2,038 | **99%** | 100% | 2.6 s |
 | treejit, edges approved + compaction | 151–200 | **1.06** | 0.90 | **1,981** | **99%** | 100% | 2.6 s |
 
-Seeds 0–5. Success is over all 200 tasks; the other columns are tasks 151–200 (plain agent / allowlist / approved / approved + compaction):
+Seeds 0–5. Success is over all 200 tasks; the other columns are tasks 151–200 (plain agent / allowlist / approved / approved + compaction). Seed 3 was re-measured after decisions 16–17; the other rows predate them:
 
 | seed | success (of 200) | full calls / task | small calls / task | tokens / task | served |
 |---|---|---|---|---|---|
 | 0 | 193 / 198 / 200 / 200 | 6.02 / 3.70 / 1.06 / 1.06 | – / 0.14 / 0.90 / 0.90 | 6,196 / 4,820 / 2,038 / 1,981 | 0 / 48 / 99 / 99% |
 | 1 | 189 / 198 / 200 / 200 | 6.36 / 4.20 / 1.02 / 1.02 | – / 0.02 / 0.28 / 0.28 | 6,684 / 5,311 / 1,637 / 1,560 | 0 / 41 / 100 / 100% |
 | 2 | 192 / 198 / 200 / 200 | 6.32 / 4.12 / 1.00 / 1.00 | – / 0.00 / 0.78 / 0.78 | 6,711 / 5,279 / 1,931 / 1,734 | 0 / 39 / 100 / 100% |
-| 3 | 189 / 198 / 199 / 199 | 6.26 / 4.18 / 1.04 / 1.04 | – / 0.08 / 1.08 / 1.08 | 6,590 / 5,527 / 2,234 / 2,127 | 0 / 43 / 99 / 99% |
+| 3 | 189 / 198 / 200 / 200 | 6.26 / 4.20 / 1.04 / 1.04 | – / 0.10 / 0.94 / 0.94 | 6,590 / 5,406 / 2,026 / 1,943 | 0 / 42 / 99 / 99% |
 | 4 | 185 / 198 / 199 / 199 | 6.28 / 4.08 / 1.02 / 1.02 | – / 0.10 / 1.20 / 1.20 | 6,744 / 5,513 / 2,315 / 2,248 | 0 / 45 / 100 / 100% |
 | 5 | 192 / 198 / 200 / 200 | 6.66 / 4.58 / 1.00 / 1.00 | – / 0.00 / 0.02 / 0.02 | 7,401 / 6,014 / 1,452 / 1,407 | 0 / 37 / 100 / 100% |
 
 - With edges approved (`treejit approve '*'`, which simulates operator review of write steps and commit points), almost every tool call is served from about task 40 on; the only full call left is usually the final answer. With the default read-only allowlist, only read steps replay, and T2/T3 rarely apply (their options must be replayable too).
-- treejit never does worse than the plain agent on these seeds. The remaining failures are the simulated model's own shortcuts at steps it still decides (allowlist mode), and one misroute at seed 3 (task 13, below).
-- **Seed 3 used to regress** (171/200 with edges approved, 86% success in tasks 151–200). The node after `git status` had learned the decision-list rule `task~src → git rm` from 2 delete-module tasks and 1 typo task in `README.md`. From task 13 on, it replayed `git rm` into every typo task whose file is under `src/`: 28 failed runs. The failures never reached the rule. Blame goes to edges, and `git rm` was right at that node for other tasks. Replayed steps never become examples, so the inputs the rule misrouted stopped producing evidence. Decisions 11–13 below fix this. One misroute is left (task 13): by then the rule had 5 supporting delete tasks and no counterexample, and that single failure demotes it.
+- treejit never does worse than the plain agent on these seeds. The remaining failures are the simulated model's own shortcuts at steps it still decides (allowlist mode), Seed 3 no longer misroutes (below).
+- **Seed 3 used to regress** (171/200 with edges approved, 86% success in tasks 151–200). The node after `git status` had learned the decision-list rule `task~src → git rm` from 2 delete-module tasks and 1 typo task in `README.md`. From task 13 on, it replayed `git rm` into every typo task whose file is under `src/`: 28 failed runs. The failures never reached the rule. Blame goes to edges, and `git rm` was right at that node for other tasks. Replayed steps never become examples, so the inputs the rule misrouted stopped producing evidence. Decisions 12–13 below fix this. One misroute was left (task 13): by then the rule had 5 supporting delete tasks and no counterexample. Decision 16 removes it: the typo task resembles none of those delete tasks, so it gets a T2 call instead, and seed 3 reaches 200/200.
 - Small calls are mostly T3 fills (the free-form commit message, the `Edit` strings) and budget checkpoints. Few of them fall back to T4 ("something else", `not_this_step`): 8 of 127 at seed 0.
 - Running the same stream through the real ASGI proxy with SSE streaming (`--via-proxy`) gives identical numbers.
 - The floor is one full model call per task, because the final answer is always generated.
@@ -199,6 +199,8 @@ Decisions made after the seed-3 regression (see Results):
 13. **Task-word rules must earn T1.** A decision-list rule on a task word replays only once `task_rule_support` (default 5) model-chosen examples support it. Observation rules need 2. Each excess negative adds that many again. Until then the rule's branch goes to a T2 call, or to T4 if T2 is off. The model's pick is a labelled example, so a chance rule is broken by the first input it would have misrouted, while a real one reaches its support within a few tasks. In the seed-3 scenario (`tests/test_learning.py`), the typo task under `src/` gets a T2 call instead of `git rm`, and the rule disappears.
 14. **A minority choice blocks T0 until it is outnumbered 8 to 1.** When the model has chosen more than one child at a node, the leading child's share gets one pseudo-count against it. So 4 choices against 1 (80%) is not enough to replay without looking at the input, and 8 against 1 is. Without this, seed 3 replayed `git rm pyproject.toml` into a version bump at task 8.
 15. **The model's decision to stop is a choice too.** When a forwarded response has no tool call (and did not stop for `max_tokens`/`length`), `complete()` records `runs.ended_after`. For passing runs, the builder adds an END choice at the contexts after the last step. END counts toward the node's evidence (`nodes.n_end`, included in `n_pass`) and can be a decision-list label. When END leads at the deciding context, the request goes straight to T4 with reason `end@…`, with no subcall and no replay. END is never replayed: the final answer always comes from the model. A starved specific context that has only seen END also vetoes a back-off proposal. In the synthetic suite, 192 of 200 final answers at seed 0 are recognised as END. The suite had no end-of-task subcall to save: no failed subcall there was followed by the final answer, before or after this change, and small calls per task are unchanged. The waste shows up when an n-gram context has a child after the last step, as in `test_t2_resolves_ambiguous_node` (3 small calls → 2) and `test_final_answer_is_recorded_as_end_and_not_proposed_again`, where it also prevents a wrong T0 replay.
+16. **A task-word rule is trusted only on tasks like those that support it.** Support alone can be reached by chance: at seed 3 the first 5 delete tasks all named `src/` paths and no typo task had yet, so `task~src → git rm` was proven when the first `src/` typo task arrived. Each task-word rule now stores the task-word sets of its supporting examples (distinct, the most recent 40). T1 replays on it only if the task's best Jaccard similarity to one of them is at least `task_rule_similarity` (default 0.5; 0 turns the gate off). Otherwise the step goes to T2 with reason `unproven_rule`, and the model's pick becomes an example, so each new kind of task costs one small call, once. The stored sets keep only the words that at least two supporting examples share, while the task keeps all of its own. A word seen in one example only (a file name, a typo word, a version) says nothing about the kind of task, and with those words kept, every typo task with a new typo looked new: in read-only mode that cost 0.033 extra small calls per task instead of 0.023. Cutting the task's words the same way made the gate too lenient, and it missed seed 3 task 13, since the words that mark a new kind of task (`correct`, `ship`) are exactly the ones no example has. Observation predicates (`err==false`, `json.status=="pending"`, `obs~line`) get no such gate: they test the state the choice depends on, and similarity over the rest of an observation (file contents, order details) would call almost every input new. Over seeds 0–5 with edges approved, observation rules made 1,257 T1 replays (1,076 on features, 181 on `obs~line`), and none of them was in a failed run.
+17. **Failures count per kind of task, not per rule.** A task-word rule also stores the task-word sets of the inputs it replayed into failed runs (`nx`, leaving out any set that also supports it, since the same words then both passed and failed). T1 needs the task to be more similar to a supporting example than to any of them. Before, the negatives of decision 12 were pooled per rule: after N passing replays on one kind of task, a second kind that shares the rule's word needed about N/4 failed runs before the excess showed, and the demotion then also sent the first kind to T2. Now, with N = 20, the second kind fails once and the first kind keeps T1 (`test_failures_count_per_input_class_not_per_rule`; it failed 6 times before). The pooled excess still applies, for failures that task words can't separate. `excess_negatives` also no longer returns float residue (`1 − 0.2·5` was 2.2e-16, not 0).
 
 ### Frontier prefix compaction (opt-in)
 
@@ -237,7 +239,7 @@ Each forwarded request records `compacted N obs/C chars` in its note and the cha
 | 0 | 2,113 | 2,043 | −3.3% | 200 → 200 |
 | 1 | 1,892 | 1,832 | −3.2% | 200 → 200 |
 | 2 | 2,229 | 2,040 | −8.5% | 200 → 200 |
-| 3 | 2,369 | 2,243 | −5.3% | 199 → 199 |
+| 3 | 2,275 | 2,157 | −5.2% | 200 → 200 |
 | 4 | 2,323 | 2,247 | −3.3% | 199 → 199 |
 | 5 | 1,877 | 1,813 | −3.4% | 200 → 200 |
 
@@ -251,8 +253,8 @@ Each forwarded request records `compacted N obs/C chars` in its note and the cha
 - **Tool execution.** treejit sees the model API, not tool execution. It backtracks its policy, not the world.
 - **Rebuild cost.** The tree is rebuilt in full for a family on each outcome (tens of ms at a few hundred runs, capped by `max_runs`). An incremental builder is future work.
 - **Stable-prefix learning.** A dynamic block early in the system prompt shrinks the learned prefix to whatever precedes it.
-- **One misroute before a chance rule is caught.** A task-word rule whose first `task_rule_support` examples all agree by chance still replays once into the input that breaks it; the failed run then demotes it (seed 3, task 13). A higher `task_rule_support` trades small calls for fewer of these.
-- **Negatives are counted per rule, not per input class.** A rule with many passing replays that starts misrouting a new kind of task needs several failures before the excess over the tolerated rate (`1 - purity`) shows. Only then is it demoted.
+- **Kinds of tasks are told apart by their words.** A new kind of task that uses the words of a known one (`delete P carefully` next to `delete P`) still gets one misroute from a task-word rule before its failed run blocks it (decision 17). The similarity threshold is global, and it doesn't weigh words.
+- **Observation rules have no similarity gate** (decision 16). A chance observation predicate, such as a line of file content that only one kind of task has seen so far, needs 2 supporting examples and is refuted only by the pooled negatives of decision 12.
 - **END needs a passing run and a visible final answer.** Streams consumed outside the engine (inline-mode streaming) don't record where the model stopped, and runs without an outcome never add END evidence.
 - **Compaction and the prompt cache.** The keep-last window moves as the conversation grows. The step that leaves it changes from full to compacted once, which invalidates the cache from that message on. A chunked boundary (advancing the window only every few steps) would trade a little compaction for longer cache hits; it isn't implemented.
 - **Run identity.** Without an `X-TreeJIT-Run` header, run ids are derived from the task and first tool-call id. Resuming the same task text in a new conversation starts a new run.
@@ -261,7 +263,7 @@ Each forwarded request records `compacted N obs/C chars` in its note and the cha
 
 ```bash
 pip install -e '.[dev]' -e bench
-pytest -q                                   # ~455 tests (mostly the policy tables), ~3 s
+pytest -q                                   # ~460 tests (mostly the policy tables), ~3 s
 python -m treejit_bench --tasks 200 --out bench_out [--via-proxy] [--seed N] [--family coding|retail|mixed] \
     [--modes baseline,treejit,treejit+ok,treejit+ok+compact]
 ```

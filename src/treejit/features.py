@@ -151,12 +151,73 @@ def excess_negatives(neg: float, confirmed: float, purity: float) -> float:
     A failed run fails every replayed step in it, not just the one that went wrong, so a few
     failures among many passing replays are noise elsewhere in the run; a failure rate above
     1 - purity is evidence against the choice itself."""
-    return max(0.0, neg - (1.0 - purity) * (neg + confirmed))
+    x = neg - (1.0 - purity) * (neg + confirmed)
+    return x if x > _EPS else 0.0  # 1 - 0.2*5 is 2.2e-16 in floats, not a negative
+
+
+_EPS = 1e-9
+MAX_CLASS_SETS = 40  # task-word sets kept per task-word rule, for the similarity gate
+
+
+def jaccard(a: set, b: set) -> float:
+    return len(a & b) / len(a | b) if a or b else 0.0
+
+
+def _class_sets(rule: dict, examples: list, negatives: list) -> None:
+    """Store on a task-word rule what the similarity gate compares an input with (see rule_resembles)."""
+    pred, label = rule["pred"], rule["edge"]
+    sup = [frozenset(e[3]) for e in examples if e[0] == label and eval_pred(pred, e[1], e[2], e[3])]
+    counts: dict[str, int] = {}
+    for w in sup:
+        for x in w:
+            counts[x] = counts.get(x, 0) + 1
+    ex: dict[frozenset, None] = {}  # distinct, ordered by most recent occurrence
+    for w in sup:
+        c = frozenset(x for x in w if counts[x] >= 2)
+        ex.pop(c, None)
+        if c:
+            ex[c] = None
+    passed = set(sup)
+    nx: dict[frozenset, None] = {}
+    for e in negatives:
+        w = frozenset(e[3])
+        if e[0] == label and eval_pred(pred, e[1], e[2], e[3]) and w not in passed:
+            nx.pop(w, None)
+            nx[w] = None
+    rule["ex"] = [sorted(w) for w in list(ex)[-MAX_CLASS_SETS:]]
+    if nx:
+        rule["nx"] = [sorted(w) for w in list(nx)[-MAX_CLASS_SETS:]]
+
+
+def rule_resembles(rule: dict, words: set, threshold: float) -> bool:
+    """The similarity gate for a task-word rule: nearest neighbours over task-word sets.
+
+    A task word that separated the evidence so far may be chance (seed 3: `src` in every delete
+    task seen, and in no typo task yet). The rule is trusted only on inputs like those that
+    support it: the best Jaccard similarity to a supporting example (`ex`) must reach
+    `threshold` and beat the best similarity to an input the rule replayed into a failed run
+    (`nx`). Anything else is a new input class, which a T2 call labels once.
+
+    Supporting examples keep only the words at least two of them share: a word seen once among
+    them (a file name, a typo word, a version) says nothing about the class, and would make
+    every task of a known kind look new. The input keeps all its words, since a word the rule
+    has never seen is exactly what marks a new kind of task. Failed inputs keep theirs too.
+    threshold <= 0 turns the gate off; a rule without stored sets (built by an older version)
+    fails it."""
+    if threshold <= 0:
+        return True
+    ex = rule.get("ex")
+    if not ex:
+        return False
+    pos = max(jaccard(words, set(e)) for e in ex)
+    neg = max((jaccard(words, set(e)) for e in rule.get("nx", ())), default=None)
+    return pos >= threshold and (neg is None or pos > neg)
 
 
 def learn_decision_list(examples: list[tuple[str, dict, str, set]], purity: float, max_rules: int = 6,
                         negatives: list[tuple[str, dict, str, set]] | None = None,
-                        confirmed: list[tuple[str, dict, str, set]] | None = None) -> dict | None:
+                        confirmed: list[tuple[str, dict, str, set]] | None = None,
+                        class_sets: bool = False) -> dict | None:
     """examples: (label, feats, obs_text, task_words). Returns a decision list or None.
 
     Greedily picks the predicate isolating the largest pure-enough subset of the
@@ -170,6 +231,12 @@ def learn_decision_list(examples: list[tuple[str, dict, str, set]], purity: floa
     A rule predicting `label` counts the matching negatives in excess of the tolerated
     failure rate (`excess_negatives`) as misses: lower purity, more leak, and a `neg`
     field that raises the support it needs before T1 replays on it (replay.rule_support).
+
+    class_sets: a task-word rule also keeps, for the similarity gate `rule_resembles`, the
+    distinct task-word sets of the examples that support it (`ex`: the most recent
+    MAX_CLASS_SETS, each cut to the words at least two of them share) and of the negatives it
+    matches (`nx`, minus any set that also supports it: the same words both passed and
+    failed, so words can't tell them apart).
     """
     if len({e[0] for e in examples}) < 2 or len(examples) < 3:
         return None
@@ -209,6 +276,8 @@ def learn_decision_list(examples: list[tuple[str, dict, str, set]], purity: floa
         rule = {"pred": pred, "edge": label, "purity": round(p, 4), "n": n, "support": matching(examples, pred, label)}
         if neg:
             rule["neg"] = round(neg, 2)
+        if class_sets and pred[0] == "task":
+            _class_sets(rule, examples, negatives)
         rules.append(rule)
         hit_ids = {id(e) for e in hit}
         remaining = [e for e in remaining if id(e) not in hit_ids]
