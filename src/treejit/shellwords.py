@@ -246,6 +246,109 @@ MULTI_COMMAND = {
 _WORDLIKE = re.compile(r"[A-Za-z][\w.:-]*")
 _ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 
+# Transparent wrappers: they run the rest of the line as a command. name -> (flags, flags taking a
+# value, long flags, long flags taking a value, operands before the command, options with side
+# effects; None = the wrapper itself is never side-effect free). Parsing stops at the first
+# non-option, as their own getopt("+...") does.
+_WRAPPERS: dict[str, tuple[str, str, set, set, int, set | None]] = {
+    "env": ("i0v", "uC", {"ignore-environment", "null", "debug"}, {"unset", "chdir"}, 0, set()),
+    # privilege elevation always needs an operator's approval
+    "sudo": ("AbEHiknPSs", "CDghpRrTUu",
+             {"askpass", "background", "preserve-env", "non-interactive", "preserve-groups", "set-home", "login",
+              "shell", "stdin", "reset-timestamp"},
+             {"close-from", "chdir", "group", "host", "prompt", "role", "type", "command-timeout", "other-user", "user"},
+             0, None),
+    "time": ("pvqa", "fo", {"portability", "verbose", "quiet", "append"}, {"format", "output"}, 0,
+             {"a", "o", "append", "output"}),  # GNU time -o FILE writes FILE
+    "nohup": ("", "", set(), set(), 0, set()),
+    "exec": ("cl", "a", set(), set(), 0, set()),
+    "command": ("p", "", set(), set(), 0, set()),
+    "nice": ("", "n", set(), {"adjustment"}, 0, set()),
+    "timeout": ("v", "sk", {"preserve-status", "foreground", "verbose"}, {"signal", "kill-after"}, 1, set()),
+    "stdbuf": ("", "ioe", set(), {"input", "output", "error"}, 0, set()),
+}
+_NUMERIC_OPT = re.compile(r"-\d+")
+
+
+def _skip_wrapper(name: str, words: list[str], i: int) -> tuple[int, bool] | None:
+    """Index just past a wrapper's own options and operands, and whether they are side-effect free.
+    None: an option this parser doesn't know (e.g. `env -S STRING`), so the command can't be located."""
+    short, short_arg, long, long_arg, operands, dirty = _WRAPPERS[name]
+    clean, n = dirty is not None, len(words)
+    dirty = dirty or set()
+    while i < n:
+        w = words[i]
+        if w == "--":
+            i += 1
+            break
+        if (name == "env" and w == "-") or (name == "nice" and _NUMERIC_OPT.fullmatch(w)):
+            i += 1
+            continue
+        if w.startswith("--"):
+            opt, eq, _ = w[2:].partition("=")
+            if opt in long and not eq:
+                pass
+            elif opt in long_arg:
+                i += 0 if eq else 1
+            else:
+                return None
+            clean = clean and opt not in dirty
+        elif w.startswith("-") and len(w) > 1:
+            for j, c in enumerate(w[1:], 1):
+                clean = clean and c not in dirty
+                if c in short:
+                    continue
+                if c not in short_arg:
+                    return None
+                if j == len(w) - 1:
+                    i += 1  # the value is the next word
+                break
+        else:
+            break
+        i += 1
+    if name in ("env", "sudo"):
+        while i < n and _ASSIGN.match(words[i]):
+            i += 1
+    return i + operands, clean
+
+
+def _lookup_only(words: list[str], i: int) -> bool:
+    """`command -v NAME` / `command -V NAME` describe NAME without running it."""
+    while i < len(words) and words[i].startswith("-") and words[i] != "--":
+        if set(words[i][1:]) & {"v", "V"}:
+            return True
+        i += 1
+    return False
+
+
+def unwrap(words: list[str]) -> tuple[int, bool, list[int]]:
+    """Locate the program a simple command really runs.
+
+    Skips `VAR=val` assignments and transparent wrappers with their options (`env -i FOO=1`,
+    `sudo -u x`, `time -p`, `nohup`, `exec`, `command`, `nice -n 5`, `timeout -s KILL 10`, `stdbuf -oL`).
+    Returns (index of the program, whether every skipped word was understood and side-effect free,
+    indices of the wrapper words). The index is len(words) when there are only assignments; a wrapper
+    with no command after it (bare `env`, `command -v git`) is itself the program. This is the single
+    view of "which program runs" shared by edge shapes, the read-only policy and commit points.
+    """
+    i, clean, n, wrappers = 0, True, len(words), []
+    while i < n:
+        if _ASSIGN.match(words[i]):
+            i += 1
+            continue
+        name = words[i].rsplit("/", 1)[-1]
+        if name not in _WRAPPERS or (name == "command" and _lookup_only(words, i + 1)):
+            return i, clean, wrappers
+        r = _skip_wrapper(name, words, i + 1)
+        if r is None:
+            return i, False, wrappers
+        j, ok = r
+        if j >= n:
+            return i, clean and ok, wrappers
+        wrappers.append(i)
+        i, clean = j, clean and ok
+    return i, clean, wrappers
+
 
 def command_heads(cmd: str) -> list[str]:
     """Structural signature of a shell command: the program (+ subcommand) of each segment.
@@ -255,9 +358,8 @@ def command_heads(cmd: str) -> list[str]:
     heads = []
     for seg in segments(tokenize(cmd)):
         words = [t for t in seg if not t.op]
-        # skip env assignments and a few transparent prefixes
-        while words and (_ASSIGN.match(words[0].val) or words[0].val in ("sudo", "env", "time", "nohup", "exec")):
-            words = words[1:]
+        # skip env assignments and transparent wrappers: the same view the policy uses
+        words = words[unwrap([t.val for t in words])[0]:]
         if not words:
             continue
         prog = words[0].val.rsplit("/", 1)[-1] if "/" in words[0].val and not words[0].val.startswith(".") else words[0].val

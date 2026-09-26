@@ -220,7 +220,15 @@ def _text_blocks_only(content: Any) -> bool:
 
 
 def _replace(content: Any, text: str) -> Any:
-    return text if isinstance(content, str) or content is None else [{"type": "text", "text": text}]
+    if isinstance(content, str) or content is None:
+        return text
+    block = {"type": "text", "text": text}
+    # a prompt-cache breakpoint on an inner block moves to the digest block (the last one wins, as
+    # the breakpoint closest to the end of the original content is the one that covered it)
+    marks = [b["cache_control"] for b in content if isinstance(b, dict) and "cache_control" in b]
+    if marks:
+        block["cache_control"] = marks[-1]
+    return [block]
 
 
 def _rewrite(dialect: str, body: dict, out: dict[str, str]) -> tuple[dict, set[str]]:

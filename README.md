@@ -104,6 +104,7 @@ Each tree edge has a tier: **hot** (replayable), **live** (promoted but blocked)
 | `dialects.py` | Parse requests into an *episode* (task + (call, observation) steps). Build replay responses as JSON or SSE. Accumulate upstream SSE for usage. Inject hints. |
 | `families.py` | Tree key = tool schemas + the learned stable prefix of the system prompt (longest common prefix, trimmed to a line). |
 | `shellwords.py` | Span-preserving shell tokenizer (quotes, `$(...)`, heredocs, operators). Replayed commands are spliced into the original text, so quoting survives. |
+| `policy.py` | What replay may emit unattended: the read-only allowlist and commit points (see [Replay safety](#replay-safety)). |
 | `templates.py` | Edge = tool + arg keys + per-segment command heads (`git commit`, `npm test`). Calls with one shape are anti-unified per token into constants and variables. |
 | `bindings.py` | Provenance search. Each variable binds to `$task` / `$obs[-k]` / `$arg[-k]` via extractors (JSON path, `key: value`, regex types, after-word, line, token), `fmt` templates (`Bump version to {$task.version}`) or `case` (value chosen by predicates). A variable with no rule is a hole. |
 | `features.py` | Predicate set: error/exit code, empty, JSON field equals, substring, task keyword. Guards are conjunctions of stable features; branches are decision lists. |
@@ -139,6 +140,31 @@ Decisions made while adding them:
 8. **A T2 pick is a model choice.** The model chose among known children, so the step is logged as not replayed and feeds purity and decision lists. T1 can then learn the branch and stop asking. Budget checkpoints and T3 steps are logged as replayed, because the tree proposed their structure.
 9. **Value back-off.** Once T3 serves a hole at a general (n-gram) context, the more specific contexts stop collecting model-chosen evidence, so they never become the deciding context. Their value rules are still learned from every passing instance, so a hole may borrow the rule the same edge has at a more specific context. Without this, T3 replaced free T0 steps with small calls (the version-bump commit message) and cost more tokens than it saved: 1,439 tokens/task against 1,373 before T2/T3.
 10. **One subcall, first step only.** Subcalls are only made for the first call of a response, and a T2/T3 step ends the batch.
+
+### Replay safety
+
+Replay emits a call with no model call and no human in the loop only if `policy.is_readonly` says the call is read-only. Otherwise the edge needs operator approval (`treejit approve`). A commit point (`is_commit_point`: `git push`, `curl`, `send_*`, ...) needs approval and `promote_runs + 1` passing runs. For shell commands (`policy.py`):
+
+- **One view of the program.** `shellwords.unwrap` skips `VAR=val` assignments and transparent wrappers with their own options: `env` (`-i`, `-u NAME`, `-C DIR`, `VAR=val`), `sudo`, `time`, `nohup`, `exec`, `command`, `nice`, `timeout N`, `stdbuf`. Edge shapes (`command_heads`), the read-only check and commit-point detection all use it, so `env git push origin main` has the shape `git push`, is a commit point, and is not read-only. An unrecognised wrapper option (such as `env -S`) makes the command not read-only. `sudo` is located but never counts as read-only. A bare `env`/`printenv` (with no command) is read-only.
+- **Allowlist, not denylist.** Every simple command in the line must run an allowlisted program (`ls`, `cat`, `grep`, `head`, `wc`, `jq`, `diff`, ...). The program must be a bare name or live in a standard bin directory (`./ls` doesn't count), and its name must be literal: no `$VAR`, globs, brace expansion or `$'\…'` escapes. Assignments are limited to harmless variables (`LC_*`, `LANG`, `TZ`, `TERM`, `NO_COLOR`, `PAGER=cat`, ...), which keeps out `LD_PRELOAD`, `PATH`, `GIT_EXTERNAL_DIFF` and similar.
+- **Per-program argument checks** accept only options they know. Their arguments must also be literal, since a glob can expand to a file named `--pre=x`. This keeps out:
+  - `sort -o`/`--compress-program`, `uniq IN OUT`, `date -s`/`date MMDDhhmm`, `hostname NAME`, `tree -o`/`-R`, `file -C`;
+  - `yq -i`/`-s`, `fd -x`/`-X`, `rg --pre`/`--hostname-bin`, `ag --pager`, `bat --pager`/`bat cache`;
+  - `find`'s exec/write actions (`-exec*`, `-ok*`, `-delete`, `-fprint*`, `-fls`).
+
+  `git` gets a separate check. Global options are limited to `-C`, `--git-dir`, `--work-tree`, `--no-pager` and similar (no `-c`, `--config-env` or `--exec-path`). The subcommand must be a read (`status`, `diff`, `log`, `show`, `grep`, ...) with no `--output` (or an abbreviation of it) and no `grep -O`. `branch`/`tag` are allowed only when listing, `config` only when reading a dotted key or with `--get*`/`--list`, `remote` only bare or with `show`/`get-url`, `stash` only with `list`/`show`, and `reflog` not with `expire`/`delete`/`drop`.
+- **sed and awk** have languages that can write files and run commands, so only a conservative subset counts as read-only:
+  - sed: flags `-n -E -r -s -u -z -e -l`; scripts made of addresses, `!`, `{}` and `p P d D n N g G h H x z = q Q l`, or `s///` with flags `g p i I m M N`. No `w`, `W`, `r`, `R`, `e`, `a`/`i`/`c`, `y` or labels, and no `-i`/`-f`.
+  - awk: only `-F` and `-v` options, and no `system`, `getline`, `extension`, `@`, `|` (except `||`) or `>` (except `>=`) anywhere in the program.
+
+  Anything outside the subset needs approval. It is cheaper to spend one model call than to classify a language by substring.
+- **Redirections** may only read (`<`, `<<<`, heredocs), duplicate a descriptor (`2>&1`, `>&2`), or write to `/dev/null`, `/dev/stdout` or `/dev/stderr`. This covers `>`, `>>`, `>|`, `&>`, `N>`, `>&FILE`, `<>` and `>(...)`. Any command substitution makes the line not read-only, and so does process substitution.
+- **Excluded by default:** `sudo`, `less`/`more` (`LESSOPEN`, `-o` log files), `xargs`, `tee`, shells, `eval`, and shell keywords (`for`, `if`, `{ }`, functions). To opt a program in, add it to `extra_readonly_commands` (`TREEJIT_EXTRA_READONLY_COMMANDS=less,xargs`). This trusts the program with any arguments, but the program-path, assignment and redirection rules still apply.
+- **Commit points** are checked at the unwrapped program (`env git push`, `timeout 60 git push`). For a command that isn't read-only, they are also checked anywhere in it (`git -C repo push`, `xargs git push`, `find -exec git push`). Nested scripts count too: `$(...)`, backticks, `sh -c`, `eval`, `env -S`, and quoted text when a shell or `watch` in the line may run it (`echo 'git push' | sh`). Quoted text elsewhere is data, so `git commit -m "then git push"` is not a commit point.
+
+Decision made while hardening it:
+
+11. **When unsure, say "not read-only".** A false "no" costs one model call, or one approval. A false "yes" runs a write with no model call and nobody watching. Checks therefore accept what they understand rather than rejecting what they recognise as dangerous. The exception is `find`, whose side-effecting actions are a closed, documented set. On the synthetic suite the stricter policy changed nothing: read-only `treejit` mode served 44% of tool calls in tasks 71–120, before and after.
 
 ### Frontier prefix compaction (opt-in)
 
@@ -197,7 +223,7 @@ Each forwarded request records `compacted N obs/C chars` in its note and the cha
 
 ```bash
 pip install -e '.[dev]' -e bench
-pytest -q                                   # 46 tests, ~2 s
+pytest -q                                   # ~450 tests (mostly the policy tables), ~3 s
 python -m treejit_bench --tasks 200 --out bench_out [--via-proxy] [--seed N] [--family coding|retail|mixed] \
     [--modes baseline,treejit,treejit+ok,treejit+ok+compact]
 ```
