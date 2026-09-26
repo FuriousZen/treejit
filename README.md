@@ -27,7 +27,8 @@ This is the MVP from the handoff, plus value branching and composite argument te
 | T2 choose / budget checkpoint, T3 hole filling (one small forced-tool subcall, proxy and inline) | done |
 | Frontier prefix compaction (verified replayed observations digested in forwarded requests) | done, **opt-in** (`compact = true`) |
 | Macros-as-tools, OpenAI Responses API, inline-mode streaming replay | not yet |
-| tau-bench runner | not yet: only the synthetic suite has been run |
+| tau-bench runner (`--suite taubench`: oracle-with-noise agent, `ClaudeAgent` for a real model, tau-bench's own reward) | done; oracle runs below, real-model runs not yet (no API key here) |
+| Bench cost model: virtual harness payload (`--payload`), prompt-cache model (`--cache`), `cost_tokens` | done |
 
 The core (`src/treejit`, except `proxy.py`) uses only the standard library. Proxy mode also needs `httpx` and `uvicorn`.
 
@@ -62,10 +63,65 @@ Seeds 0–5. Success is over all 200 tasks; the other columns are tasks 151–20
 - Small calls are mostly T3 fills (the free-form commit message, the `Edit` strings) and budget checkpoints. Few of them fall back to T4 ("something else", `not_this_step`): 8 of 127 at seed 0.
 - Running the same stream through the real ASGI proxy with SSE streaming (`--via-proxy`) gives identical numbers.
 - The floor is one full model call per task, because the final answer is always generated.
-- In the simulation a small call costs about 45% of a full call's tokens (~450 vs ~1,080), because the simulated system prompt, tools and conversation are tiny. A real harness sends far more per call (Claude Code: tens of thousands of tokens), so the token column understates what T2/T3 save.
-- **Caveats:** the model and its token counts are simulated (tokens ≈ prompt chars / 4, latency = 600 ms + 15 ms/output token), so treat the absolute numbers as illustrative. The real test is tau-bench or Claude Code traffic, which hasn't been run yet.
+- In the simulation a small call costs about 45% of a full call's tokens (~450 vs ~1,080), because the simulated system prompt, tools and conversation are tiny. A real harness sends far more per call (Claude Code: tens of thousands of tokens), so the token column understates what T2/T3 save. `--payload` and `--cache` re-price the same trajectories (below).
+- **Caveats:** the model and its token counts are simulated (tokens ≈ prompt chars / 4, latency = 600 ms + 15 ms/output token), so treat the absolute numbers as illustrative. tau-bench results with an oracle agent are [below](#tau-bench); real-model traffic hasn't been run yet.
 
-Report: [`docs/learning_curve.html`](docs/learning_curve.html) (model calls, tokens and replay share vs task index, with a table view).
+Report: [`docs/learning_curve.html`](docs/learning_curve.html) (model calls, tokens, replay share and small calls vs task index, with a table view).
+
+### Cost model: harness payload and prompt caching
+
+`--payload none|tau|claude-code` adds a virtual harness system prompt plus tool schemas to every **full** call's input (0 / ~5k / ~24k tokens). T2/T3 subcalls are built by treejit and never carry it. `--cache` models Anthropic prompt caching: breakpoints after the static prefix, after the system prompt, and at the last message of each request (automatic caching). A request reads the longest prefix an earlier request wrote and writes the rest. With either flag the CSV gains `cache_read`, `cache_write`, `cost_tokens` and `small_cost`. `cost_tokens` is in input-token equivalents: uncached input 1×, cache write 1.25×, cache read 0.1×, output 5× (`--cost-weights W,R,O`). The default output is unchanged: the seed-0 CSV is identical task for task, apart from the timing columns. The report gains a cost panel.
+
+Seed 0, 200 tasks, tasks 151–200:
+
+| scenario | plain agent cost / task | treejit, edges approved | cut | small-call cost / full-call cost |
+|---|---|---|---|---|
+| sim as-is (no payload) | – | – | – | ≈0.5 (`repro/E2_out_seed0.txt`) |
+| `--payload tau` | 37,989 | 7,711 | −80% | 0.136 |
+| `--payload claude-code` | 152,369 | 27,851 | −82% | **0.035** |
+| `--payload claude-code --cache` | 18,032 | 4,721 | −74% | 0.239 |
+
+With a payload the size of Claude Code's, a small call costs about 3.5% of a full call. With caching, full calls get about 8× cheaper, because most of the prompt is a cache read. The small calls' relative cost then rises to about a quarter of a full call. T2/T3 still pay off, but by less.
+
+## tau-bench
+
+`bench/src/treejit_bench/taubench.py` runs [tau-bench](https://github.com/sierra-research/tau-bench) tasks through treejit inline mode. It scores them with tau-bench's own `Env.calculate_reward`: the database hash after the episode must equal the hash after the ground-truth actions, and every expected output must appear in a reply. tau-bench isn't on PyPI. Its environments need only `pydantic`. When `litellm` isn't installed, a stub module is inserted; the user simulator is never called.
+
+```bash
+git clone --depth 1 https://github.com/sierra-research/tau-bench && pip install pydantic
+export TAUBENCH_PATH=$PWD/tau-bench        # tests/test_taubench.py skips without it
+python -m treejit_bench --suite taubench --tau-env retail --tau-split test --modes baseline,treejit,treejit+ok --out tau_out
+#   --tasks N --tau-start I     a slice (default: the whole split; retail test 115, train 500, dev 20; airline test 50)
+#   --noise P                   the oracle's per-write slip probability (default 0.05)
+#   --agent claude [--claude-model claude-opus-5] [--tau-user confirm]    a real model (needs ANTHROPIC_API_KEY and anthropic)
+#   --rebuild-every K           rebuild the tree after every K-th outcome (faster; changes learning dynamics, see below)
+```
+
+- **Tools and prompt.** tau-bench's `tools_info` (OpenAI function specs) become Anthropic tools, the policy wiki is the system prompt, and the task instruction is the first user message. The environment's data is serialized to JSON once and restored before each task and for the reward's replay.
+- **OracleAgent.** A deterministic agent. It makes a canonical read prefix, then the task's ground-truth actions, then a final answer containing the expected outputs. The retail prefix is `find_user_id_by_email` (or `…_by_name_zip`), `get_user_details`, `get_order_details` per order, and `get_product_details` for new items. The airline prefix is `get_user_details` and `get_reservation_details`. With probability `--noise` per write step, the oracle *slips*: a wrong reason, a dropped item, a wrong payment method, and so on. Slips depend only on (seed, env, split, task index), so every mode sees the same model mistakes. The oracle answers T2/T3 subcalls with the same policy. With noise 0 it scores reward 1.0 on all 115 retail test tasks, all 500 retail train tasks and all 50 airline test tasks.
+- **ClaudeAgent** (`--agent claude`) sends the same bodies to a real model through the Anthropic SDK. In treejit modes it runs through `jit.wrap(agent)`. It sets a cache breakpoint on the system prompt plus automatic caching, and accounts `cache_read_input_tokens` / `cache_creation_input_tokens`. Real models ask for confirmation before writes (the wiki requires it), so use `--tau-user confirm`. treejit currently splits such multi-turn episodes (PLAN M1). T2/T3 subcalls use a forced `tool_choice`. Some newer models reject that with a 400, and the subcall then falls back to T4. `claude-opus-5` accepts it. This path is tested only against a fake SDK client, since there is no API key here.
+- **ScriptedUser.** Single-turn by default: the episode ends at the agent's first text reply. `confirm` answers up to 4 agent questions with "Yes, I confirm."
+
+**Results.** Oracle, seed 0, noise 0.05, retail. There is no payload: the real wiki and 16 tool schemas (~5k tokens) are in every body. Cost is in input-token equivalents, without the cache model.
+
+| split | mode | tasks | full calls / task | small calls / task | tokens / task | cost / task | served by replay | reward |
+|---|---|---|---|---|---|---|---|---|
+| test | plain agent | 1–115 | 7.75 | – | 41,627 | 43,938 | 0% | 0.939 |
+| test | treejit, read-only allowlist | 1–115 | 4.13 | 3.21 | 29,633 | 31,420 | 65% | 0.939 |
+| test | treejit, edges approved | 1–115 | 3.76 | 3.63 | 28,084 | 29,828 | 69% | 0.939 |
+| test | treejit, edges approved + compaction | 1–115 | 3.76 | 3.63 | 27,445 | 29,189 | 69% | 0.939 |
+| test | treejit, edges approved, `--rebuild-every 10` | 1–115 | 4.31 | 3.57 | 29,244 | 31,144 | 52% | 0.939 |
+| train | plain agent | 1–300 | 6.94 | – | 36,684 | 38,737 | 0% | 0.940 |
+| train | treejit, read-only allowlist | 1–300 | 3.50 | 1.08 | 23,125 | 24,341 | 62% | 0.940 |
+| train | treejit, edges approved | 1–300 | 2.50 | 2.13 | 19,109 | 20,176 | 77% | **0.920** |
+| train | treejit, edges approved | 251–300 | 2.04 | 2.04 | 15,677 | 16,573 | 83% | 0.900 (plain agent 0.920) |
+| airline test | plain agent / allowlist / edges approved | 1–50 | 5.20 / 3.52 / 3.24 | – / 1.12 / 1.88 | 25,409 / 19,456 / 19,184 | | 0 / 40 / 47% | 0.98 / 0.98 / **0.96** |
+
+- On the retail test split, every treejit mode has exactly the plain agent's reward: the 7 failing tasks are the oracle's slips, task for task. The read-only allowlist mode also matches the plain agent on train and airline.
+- **With edges approved, treejit fails 7 retail train tasks that the plain agent passes** (149, 191, 197, 238, 243, 245 and 298), and one airline test task (29). It also avoids one slip (retail train 69, where a replayed cancel used the correct reason). This is PLAN B1, with a sharper diagnosis. In every retail case, T1 or T3 replays the irreversible `cancel_pending_order` on a pending order that the task wants *modified*, right after `get_order_details` on it. The following `modify_pending_order_*` then fails with "non-pending order cannot be modified". For example, `treejit explain tau-retail-train-0-238` shows step 6, `T1@r6 cancel_pending_order(order_id=$order_id, reason=$reason) conf=0.70`, on `#W5995614`, which the ground truth modifies. In airline task 29, a read-only task, `T1@r2 cancel_reservation(reservation_id=$reservation_id) conf=0.89` cancels the first reservation looked up. The id is the one just looked up, so the binding is consistent. What goes wrong is the *choice* of a write at a node where cancel and modify (or nothing) both follow a lookup and only the task text says which is meant. With the default allowlist these steps go to the model, so nothing is lost.
+- Small calls are frequent (2–3.6 per task). Most retail steps have their structure decided, but no binding produces a value this input needs (order id, item ids, reason), so a T3 fill asks for it. A small call costs 0.19–0.21 of a full call here, because every full call carries the ~5k-token wiki and tools.
+- **Rebuild cost.** The tree is rebuilt after each outcome, and on tau-bench data that dominates the run time. Each treejit mode took 6–13 minutes on test 115 and about 35 minutes on train 300 on this machine (4 runs in parallel), against 40 s and 100 s for the plain agent (PLAN P1). `--rebuild-every K` rebuilds only after every K-th outcome and keeps serving the stale tree in between. That changes the learning dynamics, because evidence from the last K−1 runs isn't visible yet: K=10 served 52% instead of 69% on test, in 93 s. The default is K=1.
+- The numbers differ slightly from the prototype's (`repro/E1_tau_proto.py`). The prototype drew slips per instruction text, and some of its slips had no effect. The runner keys slips on the task index and always perturbs an argument.
 
 ## Quickstart
 
@@ -261,7 +317,8 @@ Each forwarded request records `compacted N obs/C chars` in its note and the cha
 
 ```bash
 pip install -e '.[dev]' -e bench
-pytest -q                                   # ~455 tests (mostly the policy tables), ~3 s
+pytest -q                                   # ~470 tests (mostly the policy tables); tau-bench tests skip without TAUBENCH_PATH
 python -m treejit_bench --tasks 200 --out bench_out [--via-proxy] [--seed N] [--family coding|retail|mixed] \
-    [--modes baseline,treejit,treejit+ok,treejit+ok+compact]
+    [--modes baseline,treejit,treejit+ok,treejit+ok+compact] [--payload none|tau|claude-code] [--cache] [--rebuild-every K]
+TAUBENCH_PATH=../tau-bench python -m treejit_bench --suite taubench --tau-split test --out tau_out
 ```

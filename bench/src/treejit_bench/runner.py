@@ -9,6 +9,12 @@ Modes
   +compact      suffix (e.g. treejit+ok+compact): frontier prefix compaction on (Config.compact)
   proxy modes   `--via-proxy` runs the treejit modes through the real ASGI proxy with
                 streamed (SSE) responses instead of inline mode
+
+Cost model (E2): `cost_tokens` prices every call in input-token equivalents:
+uncached input 1.0, cache writes COST_WEIGHTS["write"], cache reads COST_WEIGHTS["read"],
+output COST_WEIGHTS["output"] (Anthropic list-price ratios by default). The cost columns
+only appear in the CSV when a payload or the cache model is on (`to_rows(..., cost=True)`),
+so the default sim output is unchanged.
 """
 
 from __future__ import annotations
@@ -28,6 +34,8 @@ from .sim import SimModel, make_task
 
 MODEL_BASE_MS = 600.0   # simulated time-to-first-token
 MODEL_MS_PER_TOKEN = 15.0
+COST_WEIGHTS = {"write": 1.25, "read": 0.1, "output": 5.0}
+COST_FIELDS = ("cache_read", "cache_write", "cost_tokens", "small_cost")
 
 
 @dataclass
@@ -50,6 +58,11 @@ class TaskResult:
     model_ms: float = 0.0
     engine_ms: float = 0.0
     tiers: list = field(default_factory=list)
+    cache_read: int = 0       # prompt tokens served from the (modelled or real) prompt cache
+    cache_write: int = 0      # prompt tokens written to it; input_tokens includes both
+    cost_tokens: float = 0.0  # input-token equivalents, see COST_WEIGHTS
+    small_cost: float = 0.0   # the part of cost_tokens spent on T2/T3 subcalls
+    reward: float | None = None  # tau-bench reward (None for the synthetic suite)
 
     @property
     def tokens(self) -> int:
@@ -74,10 +87,11 @@ def _execute(env: Any, content: list[dict]) -> list[dict]:
 
 
 def run_suite(n_tasks: int, seed: int = 0, family: str = "mixed", mode: str = "treejit", noise: float = 0.06,
-              db: str | None = None, max_steps: int = 30, **overrides: Any) -> list[TaskResult]:
+              db: str | None = None, max_steps: int = 30, payload: str = "none", cache: bool = False,
+              rebuild_every: int = 1, **overrides: Any) -> list[TaskResult]:
     rng = random.Random(seed)
     tasks = [make_task(rng, i, family) for i in range(n_tasks)]
-    model = SimModel(seed + 1, noise)
+    model = SimModel(seed + 1, noise, payload=payload, cache=cache)
     jit = None
     call: Callable[[dict, str], dict]
     if mode == "baseline":
@@ -106,11 +120,28 @@ def run_suite(n_tasks: int, seed: int = 0, family: str = "mixed", mode: str = "t
         if jit is not None:
             r.side_exits = _side_exits(jit, f"task-{seed}-{i}")
             r.compacted_chars = _compacted(jit, f"task-{seed}-{i}")
-            jit.outcome(f"task-{seed}-{i}", r.success, None if r.success else r.reason)
+            record_outcome(jit, f"task-{seed}-{i}", r.success, None if r.success else r.reason, i, rebuild_every)
         results.append(r)
     if jit is not None:
         jit.close()
     return results
+
+
+def record_outcome(jit: TreeJIT, run_id: str, success: bool, reason: str | None, index: int, rebuild_every: int = 1) -> None:
+    """Report the outcome. With rebuild_every=K>1 the tree is rebuilt only after every K-th task
+    (the families stay clean in between, so the engine keeps serving the stale view). This changes the
+    learning dynamics: evidence from up to K-1 runs is not visible yet. It exists because full rebuilds
+    on tau-bench data are slow (PLAN P1); K=1 is exactly `jit.outcome`."""
+    if rebuild_every <= 1:
+        jit.outcome(run_id, success, reason)
+        return
+    ids = jit.store.set_outcome(run_id, "pass" if success else "fail", reason)
+    fams = {r["family"] for r in (jit.store.run(i) for i in ids) if r is not None}
+    if (index + 1) % rebuild_every == 0:
+        jit.rebuild()
+    else:
+        for f in fams:
+            jit.store.x("UPDATE families SET dirty=0 WHERE id=?", (f,))
 
 
 def _fresh_jit(db: str | None, mode: str, **overrides: Any) -> TreeJIT:
@@ -138,8 +169,17 @@ def _compacted(jit: TreeJIT, run_id: str) -> int:
     return int(row["n"]) if row else 0
 
 
-def _snap(model: SimModel) -> tuple[int, int, int, int]:
+def _snap(model: Any) -> tuple[int, int, int, int]:
+    """Counters every bench model exposes: full calls, small calls, small input / output tokens."""
     return model.calls, model.small_calls, model.small_tokens[0], model.small_tokens[1]
+
+
+def _usage(resp: Any) -> dict:
+    u = resp.get("usage") if isinstance(resp, dict) else getattr(resp, "usage", None)
+    if u is None:
+        return {}
+    return u if isinstance(u, dict) else {k: getattr(u, k, None) for k in
+                                          ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")}
 
 
 def _account(r: TaskResult, resp: dict, before: tuple, after: tuple, ms: float) -> None:
@@ -147,19 +187,27 @@ def _account(r: TaskResult, resp: dict, before: tuple, after: tuple, ms: float) 
     r.tool_calls += len(uses)
     from_model = after[0] > before[0]
     small = after[1] - before[1]
+    w = COST_WEIGHTS
     if small:
         s_in, s_out = after[2] - before[2], after[3] - before[3]
         r.small_calls += small
         r.small_tokens += s_in + s_out
         r.input_tokens += s_in
         r.output_tokens += s_out
+        r.small_cost += s_in + w["output"] * s_out
+        r.cost_tokens += s_in + w["output"] * s_out
         r.model_ms += small * MODEL_BASE_MS + MODEL_MS_PER_TOKEN * s_out
     if from_model:
-        u = resp.get("usage") or {}
+        u = _usage(resp)
+        inp, out = int(u.get("input_tokens") or 0), int(u.get("output_tokens") or 0)
+        rd, wr = int(u.get("cache_read_input_tokens") or 0), int(u.get("cache_creation_input_tokens") or 0)
         r.model_calls += 1
-        r.input_tokens += int(u.get("input_tokens") or 0)
-        r.output_tokens += int(u.get("output_tokens") or 0)
-        r.model_ms += MODEL_BASE_MS + MODEL_MS_PER_TOKEN * int(u.get("output_tokens") or 0)
+        r.input_tokens += inp + rd + wr
+        r.output_tokens += out
+        r.cache_read += rd
+        r.cache_write += wr
+        r.cost_tokens += inp + w["write"] * wr + w["read"] * rd + w["output"] * out
+        r.model_ms += MODEL_BASE_MS + MODEL_MS_PER_TOKEN * out
         r.engine_ms += ms  # proxy/engine overhead on a forwarded call (the simulated model itself is instant)
         r.tiers.append("T4")
     else:
@@ -202,7 +250,7 @@ def _sse_events(resp: dict) -> list[bytes]:
     def ev(name: str, data: dict) -> bytes:
         return f"event: {name}\ndata: {json.dumps(data)}\n\n".encode()
 
-    start = dict(resp, content=[], stop_reason=None, usage={"input_tokens": resp["usage"]["input_tokens"], "output_tokens": 1})
+    start = dict(resp, content=[], stop_reason=None, usage=dict(resp["usage"], output_tokens=1))
     out = [ev("message_start", {"type": "message_start", "message": start})]
     for i, b in enumerate(resp["content"]):
         if b["type"] == "text":
@@ -257,14 +305,15 @@ def parse_anthropic_sse(raw: bytes) -> dict:
 
 
 async def _run_proxy_async(n_tasks: int, seed: int, family: str, mode: str, noise: float, db: str | None,
-                           max_steps: int, stream: bool, **overrides: Any) -> list[TaskResult]:
+                           max_steps: int, stream: bool, payload: str = "none", cache: bool = False,
+                           **overrides: Any) -> list[TaskResult]:
     import httpx
 
     from treejit.proxy import ProxyApp
 
     rng = random.Random(seed)
     tasks = [make_task(rng, i, family) for i in range(n_tasks)]
-    model = SimModel(seed + 1, noise)
+    model = SimModel(seed + 1, noise, payload=payload, cache=cache)
     jit = _fresh_jit(db, mode, **overrides)
     upstream = httpx.AsyncClient(transport=httpx.ASGITransport(app=_upstream_app(model)), base_url="http://upstream")
     jit.cfg.anthropic_upstream = "http://upstream"
@@ -310,10 +359,19 @@ def run_suite_proxy(n_tasks: int, seed: int = 0, family: str = "mixed", mode: st
     return asyncio.run(_run_proxy_async(n_tasks, seed, family, mode, noise, db, max_steps, stream, **overrides))
 
 
-def to_rows(results: list[TaskResult]) -> list[dict]:
+def to_rows(results: list[TaskResult], cost: bool = False) -> list[dict]:
+    """CSV rows. Cost columns only with cost=True; `reward` only when set (tau-bench)."""
     rows = []
     for r in results:
         d = asdict(r)
+        if not cost:
+            for k in COST_FIELDS:
+                d.pop(k)
+        else:
+            d["cost_tokens"] = round(r.cost_tokens, 1)
+            d["small_cost"] = round(r.small_cost, 1)
+        if r.reward is None:
+            d.pop("reward")
         d["tiers"] = "".join(t if t in ("R", "S") else "M" for t in r.tiers)
         d["tokens"] = r.tokens
         d["wall_ms"] = round(r.wall_ms, 1)

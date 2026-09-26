@@ -6,11 +6,14 @@ import html
 import json
 from typing import Any
 
+from .runner import COST_WEIGHTS
+
 MODE_LABELS = {
     "baseline": "Plain agent",
     "treejit": "treejit (read-only allowlist)",
     "treejit+ok": "treejit (edges approved)",
     "treejit+ok+compact": "treejit (edges approved, compaction)",
+    "treejit+compact": "treejit (read-only allowlist, compaction)",
 }
 
 
@@ -28,7 +31,12 @@ def report_html(series: dict[str, list[dict]], summary: dict[str, Any], meta: di
                    "tokens": [r["tokens"] for r in rows],
                    "served": [(r["replayed_calls"], r["tool_calls"]) for r in rows],
                    "wall": [r["wall_ms"] for r in rows],
+                   "small": [r["small_calls"] for r in rows],
+                   "cost": [r.get("cost_tokens", 0) for r in rows],
                    "success": [1 if r["success"] else 0 for r in rows]} for m, rows in series.items()],
+        "cost": any("cost_tokens" in r for rows in series.values() for r in rows),
+        "cache": bool(meta.get("cache")),
+        "weights": COST_WEIGHTS,
     }
     tiles = []
     base = summary.get("baseline", {}).get("last", {})
@@ -38,11 +46,16 @@ def report_html(series: dict[str, list[dict]], summary: dict[str, Any], meta: di
         last = s["last"]
         calls_cut = 1 - last["calls_per_task"] / base["calls_per_task"] if base.get("calls_per_task") else 0
         tok_cut = 1 - last["tokens_per_task"] / base["tokens_per_task"] if base.get("tokens_per_task") else 0
+        cost_tile = ""
+        if last.get("cost_per_task") is not None and base.get("cost_per_task"):
+            cost_cut = 1 - last["cost_per_task"] / base["cost_per_task"]
+            cost_tile = (f'<div><div class="big">−{cost_cut * 100:.0f}%</div>'
+                         f'<div class="sub">cost / task ({last["cost_per_task"]:,.0f} vs {base["cost_per_task"]:,.0f})</div></div>')
         tiles.append(f"""<div class="tile"><div class="tile-k">{html.escape(_label(m))} · last {last['n']} tasks</div>
 <div class="tile-row"><div><div class="big">{last['served_pct']:.0f}%</div><div class="sub">tool calls served by replay</div></div>
 <div><div class="big">−{calls_cut * 100:.0f}%</div><div class="sub">model calls / task ({last['calls_per_task']:.2f} vs {base.get('calls_per_task', 0):.2f}; + {last.get('small_calls_per_task', 0):.2f} small)</div></div>
-<div><div class="big">−{tok_cut * 100:.0f}%</div><div class="sub">tokens / task</div></div>
-<div><div class="big">{last['success_pct']:.0f}%</div><div class="sub">success (plain agent {base.get('success_pct', 0):.0f}%)</div></div></div></div>""")
+<div><div class="big">−{tok_cut * 100:.0f}%</div><div class="sub">tokens / task</div></div>{cost_tile}
+<div><div class="big">{last['success_pct']:.0f}%</div><div class="sub">{"reward 1.0" if "reward" in last else "success"} (plain agent {base.get('success_pct', 0):.0f}%)</div></div></div></div>""")
     rows = []
     for m, s in summary.items():
         for wname in ("first", "mid", "last"):
@@ -51,8 +64,17 @@ def report_html(series: dict[str, list[dict]], summary: dict[str, Any], meta: di
                         f"<td>{w['calls_per_task']:.2f}</td><td>{w.get('small_calls_per_task', 0):.2f}</td><td>{w['tokens_per_task']:,.0f}</td><td>{w['served_pct']:.0f}%</td>"
                         f"<td>{w['success_pct']:.0f}%</td><td>{w['wall_s_per_task']:.1f}</td><td>{w['side_exits']}</td></tr>")
     meta_line = " · ".join(f"{k}={v}" for k, v in meta.items())
+    if meta.get("suite") == "taubench":
+        title = f"treejit on tau-bench ({meta.get('env', 'retail')}, {meta.get('split', 'test')} split)"
+        lede = (f"The same tau-bench task stream run by the {html.escape(str(meta.get('agent', 'oracle')))} agent with treejit off and on, "
+                "scored by tau-bench's own reward. Curves are rolling means over the previous tasks; the tree starts empty.")
+    else:
+        title = "treejit learning curve"
+        lede = ("The same synthetic task stream (coding + retail workflows) run by a simulated agent with treejit off and on. "
+                "Curves are rolling means over the previous tasks; the tree starts empty.")
     return TEMPLATE.replace("__DATA__", json.dumps(data)).replace("__TILES__", "".join(tiles)) \
-        .replace("__ROWS__", "".join(rows)).replace("__META__", html.escape(meta_line))
+        .replace("__ROWS__", "".join(rows)).replace("__META__", html.escape(meta_line)) \
+        .replace("__TITLE__", html.escape(title)).replace("__LEDE__", lede)
 
 
 TEMPLATE = r"""<!doctype html>
@@ -61,12 +83,12 @@ TEMPLATE = r"""<!doctype html>
 <style>
 :root { color-scheme: light; --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
   --grid:#e1e0d9; --axis:#c3c2b7; --ring:rgba(11,11,11,0.10);
-  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#8a5cf5; }
+  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#8a5cf5; --s5:#e87ba4; }
 @media (prefers-color-scheme: dark) { :root:where(:not([data-theme="light"])) { color-scheme: dark; --page:#0d0d0d; --surface:#1a1a19;
   --ink:#ffffff; --ink2:#c3c2b7; --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,0.10);
-  --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#9d74f7; } }
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#9d74f7; --s5:#d55181; } }
 :root[data-theme="dark"] { color-scheme: dark; --page:#0d0d0d; --surface:#1a1a19; --ink:#ffffff; --ink2:#c3c2b7;
-  --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,0.10); --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#9d74f7; }
+  --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,0.10); --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#9d74f7; --s5:#d55181; }
 * { box-sizing: border-box; }
 body { margin:0; background:var(--page); color:var(--ink); font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; }
 main { max-width:1080px; margin:0 auto; padding:24px 16px 48px; }
@@ -96,9 +118,8 @@ th { color:var(--ink2); font-weight:500; }
 .meta { color:var(--muted); font-size:12px; margin-top:16px; }
 </style></head>
 <body><main>
-<h1>treejit learning curve</h1>
-<p class="lede">The same synthetic task stream (coding + retail workflows) run by a simulated agent with treejit off and on.
-Curves are rolling means over the previous tasks; the tree starts empty.</p>
+<h1>__TITLE__</h1>
+<p class="lede">__LEDE__</p>
 <div class="tiles">__TILES__</div>
 <div class="legend" id="legend"></div>
 <div class="charts" id="charts"></div>
@@ -109,14 +130,17 @@ __ROWS__</table></div></details>
 </main>
 <script>
 const D = __DATA__;
-const COLORS = ["var(--s1)", "var(--s2)", "var(--s3)", "var(--s4)"];
+const COLORS = ["var(--s1)", "var(--s2)", "var(--s3)", "var(--s4)", "var(--s5)"];
 function roll(xs, w) { const out = []; let s = 0; for (let i = 0; i < xs.length; i++) { s += xs[i]; if (i >= w) s -= xs[i - w]; out.push(s / Math.min(i + 1, w)); } return out; }
 function rollRatio(pairs, w) { const out = []; for (let i = 0; i < pairs.length; i++) { let a = 0, b = 0; for (let j = Math.max(0, i - w + 1); j <= i; j++) { a += pairs[j][0]; b += pairs[j][1]; } out.push(b ? 100 * a / b : 0); } return out; }
 const METRICS = [
   { key: "calls", title: "Model calls per task", sub: "lower is better", f: m => roll(m.calls, D.window), fmt: v => v.toFixed(2) },
   { key: "tokens", title: "Tokens per task", sub: "prompt + completion sent to the model", f: m => roll(m.tokens, D.window), fmt: v => Math.round(v).toLocaleString() },
   { key: "served", title: "Tool calls served by replay", sub: "% of the task's tool calls, no full model call", f: m => rollRatio(m.served, D.window), fmt: v => v.toFixed(0) + "%" },
+  { key: "small", title: "Small calls per task (T2/T3)", sub: "short forced-tool subcalls; the plain agent makes none", f: m => roll(m.small, D.window), fmt: v => v.toFixed(2) },
 ];
+if (D.cost) METRICS.push({ key: "cost", title: "Cost per task", sub: "input-token equivalents: " + (D.cache ? `cache write ${D.weights.write}×, read ${D.weights.read}×, ` : "") + `output ${D.weights.output}×`, f: m => roll(m.cost, D.window), fmt: v => Math.round(v).toLocaleString() });
+const HIDE_BASELINE = new Set(["served", "small"]);
 const legend = document.getElementById("legend");
 D.modes.forEach((m, i) => { const s = document.createElement("span"); s.style.setProperty("--c", COLORS[i]); s.textContent = m.label; legend.appendChild(s); });
 const NS = "http://www.w3.org/2000/svg";
@@ -141,10 +165,10 @@ METRICS.forEach(M => {
     const t = el("text", { x: L - 6, y: y(v) + 3.5, "text-anchor": "end", class: "tick" }, svg); t.textContent = M.key === "served" ? v + "%" : (v >= 1000 ? (v / 1000) + "k" : +v.toFixed(2));
   }
   const step = n > 150 ? 50 : n > 60 ? 20 : 10;
-  for (let i = 0; i < n; i += step) { const t = el("text", { x: x(i), y: H - 8, "text-anchor": "middle", class: "tick" }, svg); t.textContent = i + 1; }
+  for (let i = 0; i < n; i += step) { if (x(i) > W - R - 44) continue; const t = el("text", { x: x(i), y: H - 8, "text-anchor": "middle", class: "tick" }, svg); t.textContent = i + 1; }
   const tl = el("text", { x: W - R, y: H - 8, "text-anchor": "end", class: "tick" }, svg); tl.textContent = "task #";
   ys.forEach((vals, si) => {
-    if (M.key === "served" && D.modes[si].key === "baseline") return;
+    if (HIDE_BASELINE.has(M.key) && D.modes[si].key === "baseline") return;
     const d = vals.map((v, i) => (i ? "L" : "M") + x(i).toFixed(1) + " " + y(v).toFixed(1)).join(" ");
     el("path", { d, fill: "none", stroke: COLORS[si], "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }, svg);
   });
@@ -159,7 +183,7 @@ METRICS.forEach(M => {
     tip.replaceChildren();
     const head = document.createElement("div"); head.className = "k"; head.textContent = "task " + (i + 1); tip.appendChild(head);
     ys.forEach((vals, si) => {
-      if (M.key === "served" && D.modes[si].key === "baseline") { dots[si].setAttribute("visibility", "hidden"); return; }
+      if (HIDE_BASELINE.has(M.key) && D.modes[si].key === "baseline") { dots[si].setAttribute("visibility", "hidden"); return; }
       dots[si].setAttribute("cx", x(i)); dots[si].setAttribute("cy", y(vals[i])); dots[si].setAttribute("visibility", "visible");
       const row = document.createElement("div"); const sw = document.createElement("i"); sw.style.background = COLORS[si];
       const b = document.createElement("b"); b.textContent = M.fmt(vals[i]) + " ";
