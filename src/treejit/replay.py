@@ -85,9 +85,44 @@ def rule_support(cfg: Config, rule: dict) -> float:
     return base * (1 + rule.get("neg", 0))
 
 
+def contested(view: TreeView, nodes: list[str], edge: str) -> bool:
+    """The model has chosen something other than `edge` after this history: a sibling (read or write)
+    or ending the episode (END), at any context of the step, from the most specific to the most
+    general n-gram. Evidence is pooled across contexts on purpose: a narrow context that has only
+    seen `edge` so far says less than a general one where the model chose several things."""
+    for nid in nodes:
+        if view.node_end.get(nid, 0) > 0:
+            return True
+        if any(k.edge != edge and k.pass_n > 0 for k in view.children.get(nid, [])):
+            return True
+    return False
+
+
+def commit_rule_ok(cfg: Config, leaf: dict, words: set) -> bool:
+    """A decision-list rule may pick a contested commit point only if it separated the siblings in
+    all the evidence: no example of another choice (or END) where its predicate holds (`leak` 0,
+    counted over every example at the node, not only those left when the rule was picked), no
+    excess failed replays, `task_rule_support` supporting examples whatever the predicate (an
+    observation predicate can hold on inputs the task wants handled differently: `status ==
+    pending` precedes both cancel and modify), and a task like those examples (the L1 gate, here for
+    observation predicates too; features.rule_resembles)."""
+    if leaf.get("leak", 1) or leaf.get("neg", 0):
+        return False
+    if leaf.get("support", leaf["n"]) < max(cfg.task_rule_support, 2):
+        return False
+    return rule_resembles(leaf, words, cfg.task_rule_similarity)
+
+
 def _choose(view: TreeView, cfg: Config, nid: str, kids: list[NodeEdge], feats: dict | None, text: str,
-            words: set, pending: bool, holes_ok: bool = False) -> tuple[NodeEdge | None, str, float, str]:
-    """Returns (edge, tier, confidence, why-not). why-not "end": the model ends the episode here."""
+            words: set, pending: bool, holes_ok: bool = False,
+            nodes: list[str] | None = None) -> tuple[NodeEdge | None, str, float, str]:
+    """Returns (edge, tier, confidence, why-not). why-not "end": the model ends the episode here.
+
+    Commit points (irreversible or externally visible calls) where the model has also chosen
+    something else (`contested` over `nodes`, the step's contexts) never replay on share alone
+    (T0), and on a decision-list rule (T1) only when `commit_rule_ok`. Otherwise why-not is
+    "commit_contested", and the step goes to a T2 call that shows the model the task."""
+    nodes = nodes if nodes is not None else [nid]
     n = view.node_pass.get(nid, 0)
     n_end = view.node_end.get(nid, 0)
     best = max(kids, key=lambda ne: (ne.pass_n, ne.conf, ne.edge)) if kids else None
@@ -101,6 +136,7 @@ def _choose(view: TreeView, cfg: Config, nid: str, kids: list[NodeEdge], feats: 
         # the model has chosen differently here too: one pseudo-count for the other side, so
         # 4 choices against 1 (80%) is not enough to replay blindly, 8 against 1 is
         share *= n / (n + 1) if n else 0.0
+    why = "ambiguous"
     if share >= cfg.purity:
         if best.tomb:
             return None, "", 0.0, "tombstoned"
@@ -108,9 +144,13 @@ def _choose(view: TreeView, cfg: Config, nid: str, kids: list[NodeEdge], feats: 
             return None, "", 0.0, f"not_replayable:{best.tier}" + (":holes" if best.holes else "")
         if feats is not None and best.guard and not guard_holds(best.guard, feats):
             return None, "", 0.0, "guard"
-        return best, "T0", best.conf, ""
+        if not (best.commit_point and contested(view, nodes, best.edge)):
+            return best, "T0", best.conf, ""
+        # a majority is not a reason to commit: the minority choice was made on some input, and
+        # T0 doesn't look at the input. Only a rule that separates the choices may pick it.
+        why = "commit_contested"
     if pending:
-        return None, "", 0.0, "ambiguous"
+        return None, "", 0.0, why
     dl = view.stumps.get(nid)
     if dl:
         leaf = eval_decision_list(dl, feats or {}, text, words)
@@ -130,9 +170,11 @@ def _choose(view: TreeView, cfg: Config, nid: str, kids: list[NodeEdge], feats: 
                     # examples, or resembles one it misrouted more. Same T2 question, asked once per
                     # new input class, since the pick becomes an example (features.rule_resembles)
                     return None, "", 0.0, "unproven_rule"
+                if ne.commit_point and contested(view, nodes, ne.edge) and not commit_rule_ok(cfg, leaf, words):
+                    return None, "", 0.0, "commit_contested"
                 return ne, "T1", leaf["purity"] * ne.success, ""
             return None, "", 0.0, "branch_not_replayable"
-    return None, "", 0.0, "ambiguous"
+    return None, "", 0.0, why
 
 
 def materialize(view: TreeView, cfg: Config, opt: Option, filled: dict[str, Val] | None = None) -> tuple[dict | None, str]:
@@ -251,6 +293,7 @@ def decide(view: TreeView, cfg: Config, req: NormRequest, dialect: Dialect) -> P
         kids: list[NodeEdge] = []
         seen_here: list[set[str]] = []  # model choices at more specific contexts we backed off from
         starved: list[str] = []          # ...and those contexts
+        nodes = [node_id(view.family, kind, ctx) for kind, ctx in ctxs]  # every context of this step
         for kind, ctx in ctxs:
             cand = node_id(view.family, kind, ctx)
             here = view.children.get(cand, [])
@@ -268,7 +311,7 @@ def decide(view: TreeView, cfg: Config, req: NormRequest, dialect: Dialect) -> P
                 starved.append(cand)
                 continue
             nid, used, kids = cand, f"{kind}{len(ctx)}", here
-            ne, tier, conf, why = _choose(view, cfg, cand, kids, feats, text, words, pending, holes_ok)
+            ne, tier, conf, why = _choose(view, cfg, cand, kids, feats, text, words, pending, holes_ok, nodes)
             if ne is not None:
                 if any(ne.edge not in chosen for chosen in seen_here):
                     why = "backoff_disagrees"
@@ -276,11 +319,14 @@ def decide(view: TreeView, cfg: Config, req: NormRequest, dialect: Dialect) -> P
                     choice = (ne, tier, conf)
             break
         if choice is None:
-            if (why in ("ambiguous", "unproven_rule") and first and cfg.t2 and nid and count < cfg.hard_cap
-                    and sum(1 for k in kids if k.pass_n > 0 and not k.tomb) >= 2):
+            # a contested commit point is asked about even when it is the only known child (the
+            # other choice was END, or was made at another context): option 0 is "something else"
+            if (why in ("ambiguous", "unproven_rule", "commit_contested") and first and cfg.t2 and nid
+                    and count < cfg.hard_cap
+                    and sum(1 for k in kids if k.pass_n > 0 and not k.tomb) >= (1 if why == "commit_contested" else 2)):
                 opts = _alternatives(view, cfg, kids, feats, S)[:MAX_OPTIONS]
                 if sum(o.ne.purity for o in opts) >= MIN_COVER:
-                    plan.sub = Subcall("choose", nid, used, opts, "ambiguous")
+                    plan.sub = Subcall("choose", nid, used, opts, "commit" if why == "commit_contested" else "ambiguous")
             plan.reason = plan.reason or (why + (f"@{used}" if used else ""))
             break
         ne, tier, conf = choice
