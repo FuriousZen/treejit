@@ -92,7 +92,7 @@ Merge order within a wave: the owner of the most shared files goes first (W2 in 
 | Wave | State |
 |---|---|
 | Investigation | done (4 read-only Opus investigators, reports summarized above) |
-| A | merged: W1 learner, W2 policy, W3 compaction, W5 inline streaming, W6 families. W9 eval still running |
-| B | running: W4 identity + episodes, W7 performance |
-| C | pending |
-| D | pending |
+| A | merged (W1, W2, W3, W5, W6, W9) |
+| B | merged (W4, W7) |
+| C | merged (W8, W10) |
+| D | running: independent review; full sim + tau-bench measurement and README consolidation |
