@@ -378,6 +378,7 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
 
     # 4. per node-edge statistics
     ne_rows = []
+    commit_at: dict[str, set] = defaultdict(set)  # node -> its commit-point edges (for the stump's commit gate)
     for (nid, eid) in list(inst) + [k for k in corr if k not in inst]:
         lst = inst.get((nid, eid), [])
         tpl = edge_tpl[eid]
@@ -423,6 +424,8 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
         # `treejit approve EDGE --not-commit` is per edge; `approve '*'` never implies it
         commit = bool(why_commit) and eid not in not_commit
         approved = (eid, nid) in approvals or (eid, "") in approvals or ("*", "") in approvals
+        if commit:
+            commit_at[nid].add(eid)
         safe = readonly or approved
         fillable = live and not tomb and safe and (not commit or (approved and pass_runs >= cfg.promote_runs + 1))
         replayable = fillable and not holes
@@ -466,7 +469,8 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
         negatives = [example(rd, i, eid) for rd, i, eid in negs.get(nid, [])[-200:]]
         confirmed = [example(rd, i, eid) for rd, i, eid in confs.get(nid, [])[-200:]] if negatives else []
         stump = learn_decision_list(_shared_only(examples), cfg.purity, negatives=negatives, confirmed=confirmed,
-                                    class_sets=True) if len({e[0] for e in examples}) > 1 else None
+                                    class_sets=True, gated=commit_at.get(nid, set())) \
+            if len({e[0] for e in examples}) > 1 else None
         parent = via = None
         if kind == "r" and ctx:
             parent, via = _node_id(family, "r", ctx[:-1]), ctx[-1]

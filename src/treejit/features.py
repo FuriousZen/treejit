@@ -217,7 +217,7 @@ def rule_resembles(rule: dict, words: set, threshold: float) -> bool:
 def learn_decision_list(examples: list[tuple[str, dict, str, set]], purity: float, max_rules: int = 6,
                         negatives: list[tuple[str, dict, str, set]] | None = None,
                         confirmed: list[tuple[str, dict, str, set]] | None = None,
-                        class_sets: bool = False) -> dict | None:
+                        class_sets: bool = False, gated: set | frozenset = frozenset()) -> dict | None:
     """examples: (label, feats, obs_text, task_words). Returns a decision list or None.
 
     Greedily picks the predicate isolating the largest pure-enough subset of the
@@ -237,6 +237,11 @@ def learn_decision_list(examples: list[tuple[str, dict, str, set]], purity: floa
     MAX_CLASS_SETS, each cut to the words at least two of them share) and of the negatives it
     matches (`nx`, minus any set that also supports it: the same words both passed and
     failed, so words can't tell them apart).
+
+    With class_sets, every rule also records its `leak`: how many examples of *other* labels, among
+    all examples (not only those left when the rule was picked), its predicate holds on. A rule
+    whose label is in `gated` (the commit points at this node) keeps its `ex`/`nx` sets whatever its
+    predicate, for the commit-point gate in replay._choose.
     """
     if len({e[0] for e in examples}) < 2 or len(examples) < 3:
         return None
@@ -276,8 +281,10 @@ def learn_decision_list(examples: list[tuple[str, dict, str, set]], purity: floa
         rule = {"pred": pred, "edge": label, "purity": round(p, 4), "n": n, "support": matching(examples, pred, label)}
         if neg:
             rule["neg"] = round(neg, 2)
-        if class_sets and pred[0] == "task":
-            _class_sets(rule, examples, negatives)
+        if class_sets:
+            rule["leak"] = sum(1 for e in examples if e[0] != label and eval_pred(pred, e[1], e[2], e[3]))
+            if pred[0] == "task" or label in gated:
+                _class_sets(rule, examples, negatives)
         rules.append(rule)
         hit_ids = {id(e) for e in hit}
         remaining = [e for e in remaining if id(e) not in hit_ids]
