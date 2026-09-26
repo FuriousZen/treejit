@@ -10,11 +10,13 @@ model call and no human in the loop.
 
 from __future__ import annotations
 
+import dataclasses
 import fnmatch
+import functools
 import re
 
 from .config import Config
-from .shellwords import _ASSIGN, _skip_subst, segments, tokenize, unwrap
+from .shellwords import _ASSIGN, _skip_subst, program_index, segments, tokenize, unwrap
 from .templates import SHELL_KEYS
 
 # Read-only whatever their arguments (none of them can write a file or run a command).
@@ -495,7 +497,7 @@ def _commands(cmd: str, toks: list | None = None) -> list[tuple[list[str], list[
     return out
 
 
-def _program_readonly(words: list[str], raws: list[str], extra: set[str]) -> bool:
+def _program_readonly(words: list[str], raws: list[str], extra: set[str], trust_git: bool = True) -> bool:
     start, clean, wrappers = unwrap(words)
     if not clean:
         return False
@@ -509,6 +511,10 @@ def _program_readonly(words: list[str], raws: list[str], extra: set[str]) -> boo
     if not (_plain(raws[start]) or words[start] == "[") or not _trusted_path(words[start]):
         return False
     prog = words[start].rsplit("/", 1)[-1]
+    if prog == "git" and not trust_git:
+        # git reads run programs named by the repository's config and attributes (core.fsmonitor,
+        # diff.external, textconv, clean filters): read-only only in a checkout we trust
+        return False
     if prog in extra or prog in _ANY_ARGS:
         return True
     check = _CHECKED.get(prog)
@@ -524,7 +530,8 @@ def shell_readonly(cmd: str, cfg: Config) -> bool:
     if any(not t.op and _scan(cmd[t.start : t.end])[2] for t in toks):
         return False
     extra = set(cfg.extra_readonly_commands)
-    return all(ok and _program_readonly(words, raws, extra) for words, raws, ok in _commands(cmd, toks))
+    trust = cfg.trust_repo_config
+    return all(ok and _program_readonly(words, raws, extra, trust) for words, raws, ok in _commands(cmd, toks))
 
 
 def _match(name: str, patterns: list[str]) -> bool:
@@ -539,15 +546,520 @@ def is_readonly(tool: str, args: dict, cfg: Config) -> bool:
 
 
 # ------------------------------------------------------------------ commit points
+#
+# A commit point is a call whose effects leave the machine or can't be taken back (`git push`, `curl`,
+# `send_*`), or whose effects can't be seen from the call at all: an interpreter, a shell, a script, a
+# task-runner target or package script, a git alias, a `gh` command that isn't a read, a cloud CLI
+# write. `commit_reason` says why ('' = not a commit point). The builder stores it per (node, edge),
+# and `replay.materialize` rejects a render whose reason differs, so a value the model fills in (T3)
+# can't change it. Patterns only match where a program runs: the unwrapped program of each simple
+# command, the command `xargs`/`find -exec`/`watch`/... run, and nested scripts (`sh -c`, `$(...)`).
 
-_SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "mksh", "fish", "su", "runuser"}
-_RUNS_TEXT = _SHELLS | {"watch", "eval"}
+_SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "mksh", "fish", "su", "runuser", "tcsh", "csh", "ash", "busybox"}
+_RUNS_TEXT = _SHELLS | {"watch", "eval", "parallel"}
 _SCRIPTY = re.compile(r"\s|[;&|]")
+_INTERP = re.compile(
+    r"(python|pypy)(\d+(\.\d+)*)?|node(js)?|perl(\d+(\.\d+)*)?|ruby|php(\d+(\.\d+)*)?|lua(jit|\d+(\.\d+)*)?|R|"
+    r"Rscript|osascript|pwsh|powershell|tclsh|wish|julia|java|groovy|kotlin|scala|elixir|erl|escript|guile|racket|"
+    r"sbcl|swift|[gmn]?awk|tsx|ts-node|expect")
+_SCRIPT_EXT = (".sh", ".bash", ".zsh", ".py", ".rb", ".pl", ".js", ".mjs", ".cjs", ".ts", ".php", ".lua", ".ps1")
+_TOOL_BIN = re.compile(r"(.*/)?(node_modules/\.bin|\.?venv/bin|env/bin|\.tox/[^/]+/bin)")
+
+# Known-local runners: they run the project's tests, linters or build. Not read-only (they write
+# caches and build output), but not commit points either.
+_LOCAL_TOOLS = {"pytest", "py.test", "tox", "ruff", "mypy", "black", "flake8", "pylint", "isort", "eslint", "prettier",
+                "tsc", "jest", "vitest", "mocha", "pyright", "biome", "coverage", "stylelint", "rustfmt", "gofmt",
+                "golangci-lint", "shellcheck", "yamllint", "markdownlint", "playwright", "unittest"}
+_LOCAL_PY_MODULES = {"pytest", "unittest", "mypy", "ruff", "black", "flake8", "pylint", "isort", "doctest", "compileall",
+                     "pip", "venv", "tox", "coverage", "py_compile", "json.tool", "pyright", "build"}
+# task and package-script names made only of these words are local: `test`, `test:unit`, `lint-fix`, `build`
+_LOCAL_WORDS = {"test", "tests", "unit", "integration", "e2e", "smoke", "lint", "linters", "build", "check", "checks",
+                "typecheck", "types", "type", "format", "fmt", "clean", "coverage", "cov", "compile", "package", "verify",
+                "validate", "install", "ci", "all", "dev", "debug", "watch", "fast", "quick", "local", "style", "fix",
+                "doc", "docs", "html", "assemble", "vet", "bench", "benchmark", "benchmarks", "deps", "py", "js", "ts",
+                "mypy", "ruff", "pytest", "eslint", "prettier", "jest", "vitest", "flake8", "pylint", "classes", "jar",
+                "spec", "specs"}
+_CAMEL = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+")
+
+
+def _local_name(name: str, raw: str | None = None) -> bool:
+    """A task or script name made only of local words (`test`, `test:unit`, `lint-fix`, `testDebugUnitTest`)."""
+    if not name or (raw is not None and not _plain(raw)) or not re.fullmatch(r"[\w:./-]+", name):
+        return False
+    for seg in re.split(r"[:_./-]+", name):
+        if seg and not (seg.lower() in _LOCAL_WORDS or seg.isdigit()
+                        or all(p.lower() in _LOCAL_WORDS or p.isdigit() for p in _CAMEL.findall(seg))):
+            return False
+    return True
+
+
+def _positionals(args: list[str], raws: list[str], values: set = frozenset()) -> list[tuple[str, str]]:
+    """Non-option words (and their raw text), skipping the value of an option in `values`."""
+    out, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            out += list(zip(args[i + 1 :], raws[i + 1 :]))
+            break
+        if a.startswith("-") and a != "-":
+            i += 2 if a in values else 1
+            continue
+        out.append((a, raws[i]))
+        i += 1
+    return out
+
+
+# ---- task runners: local only when every target is a local name
+
+_TASK_RUNNERS = {"make", "gmake", "just", "rake", "task", "invoke", "inv", "nox", "gradle", "gradlew", "mvn", "mvnw", "ant"}
+_TASK_VALUES = {"-C", "-f", "-I", "-o", "-W", "-d", "-p", "-b", "-x", "-pl", "-rf", "--directory", "--file", "--makefile",
+                "--justfile", "--working-directory", "--noxfile", "--python", "--project-dir", "--build-file",
+                "--include-dir", "--old-file", "--what-if", "--new-file"}
+
+
+def _task_reasons(prog: str, args: list[str], raws: list[str]) -> list[str]:
+    if any(a.startswith(("--eval", "-E")) for a in args):
+        return ["task runner"]  # `make --eval=...` defines rules on the command line
+    words, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-j", "-l") and i + 1 < len(args) and args[i + 1].isdigit():
+            i += 2
+            continue
+        if a.startswith("-"):
+            i += 2 if a in _TASK_VALUES else 1
+            continue
+        if _ASSIGN.match(a):
+            return ["task runner"]  # `make test PYTEST='...'` overrides what the recipe runs
+        words.append((a, raws[i]))
+        i += 1
+    if prog in ("just", "task"):
+        words = words[:1]  # the rest are the recipe's arguments
+    return [] if words and all(_local_name(w, r) for w, r in words) else ["task runner"]
+
+
+# ---- package managers
+
+_PKG_VALUES = {"--prefix", "-w", "--workspace", "--registry", "--tag", "--userconfig", "--cache", "--loglevel", "--otp",
+               "--filter", "-F", "--cwd", "-C", "--dir", "--with", "--with-requirements", "--python", "-p", "--package",
+               "--extra", "--group", "--env-file", "--directory", "--project", "--index", "--index-url"}
+_PKG_REMOTE = {"publish", "unpublish", "deprecate", "dist-tag", "dist-tags", "owner", "author", "access", "team", "org",
+               "token", "star", "unstar", "hook", "tag", "yank", "push", "deploy"}
+_PKG_LOCAL = {  # subcommands with local effects (installs run lifecycle scripts; accepted like `pip install`)
+    "npm": {"install", "i", "in", "ci", "add", "uninstall", "remove", "rm", "un", "update", "up", "upgrade", "ls", "list",
+            "ll", "la", "outdated", "audit", "view", "info", "show", "v", "search", "pack", "version", "init", "link", "ln",
+            "config", "get", "set", "cache", "doctor", "explain", "why", "fund", "help", "prefix", "root", "bin", "query",
+            "sbom", "dedupe", "prune", "rebuild", "shrinkwrap", "diff", "pkg", "completion", "ping", "whoami", "docs",
+            "repo", "bugs", "home", "login", "logout", "install-test", "it", "install-ci-test", "cit"},
+    "pnpm": {"install", "i", "add", "update", "up", "upgrade", "remove", "rm", "uninstall", "un", "link", "ln", "unlink",
+             "import", "rebuild", "rb", "prune", "fetch", "patch", "patch-commit", "audit", "list", "ls", "ll", "outdated",
+             "why", "licenses", "store", "root", "bin", "config", "c", "get", "set", "init", "pack", "env", "setup",
+             "ci", "dedupe", "install-test", "it", "help", "login", "logout", "view", "info"},
+    "yarn": {"add", "remove", "install", "info", "why", "list", "upgrade", "up", "upgrade-interactive", "init", "config",
+             "cache", "audit", "outdated", "pack", "link", "unlink", "bin", "version", "set", "plugin", "constraints",
+             "dedupe", "explain", "patch", "rebuild", "stage", "unplug", "global", "check", "licenses", "import",
+             "login", "logout", "help", "workspaces"},
+    "bun": {"install", "i", "add", "a", "remove", "rm", "update", "link", "unlink", "pm", "outdated", "build", "init",
+            "upgrade", "audit", "info", "patch", "help"},
+    "cargo": {"build", "b", "check", "c", "clean", "doc", "d", "new", "init", "add", "remove", "rm", "test", "t", "bench",
+              "update", "search", "install", "uninstall", "fmt", "clippy", "tree", "metadata", "fetch", "vendor",
+              "generate-lockfile", "locate-project", "pkgid", "verify-project", "version", "help", "fix", "rustc",
+              "rustdoc", "package", "login", "logout", "report", "config", "info", "nextest", "llvm-cov", "tarpaulin",
+              "deny", "audit", "outdated", "machete", "udeps", "hack", "insta", "expand", "miri"},
+    "go": {"build", "test", "vet", "fmt", "mod", "get", "install", "list", "env", "version", "doc", "work", "clean", "tool",
+           "help", "bug", "telemetry", "fix"},
+    "deno": {"test", "lint", "fmt", "check", "compile", "bundle", "info", "doc", "cache", "install", "uninstall", "add",
+             "remove", "outdated", "init", "upgrade", "bench", "coverage", "types", "completions", "help"},
+    "dotnet": {"test", "build", "restore", "format", "clean", "pack", "new", "add", "remove", "list", "sln", "publish",
+               "msbuild", "help", "--info", "--version", "workload", "tool", "dev-certs", "user-secrets"},
+}
+_PKG_SCRIPT_SHORTHAND = {"pnpm", "yarn", "bun"}   # `yarn build` runs the `build` script
+_RUNNER_ONLY = {"npx", "pnpx", "bunx", "uvx"}
+_CMD_RUNNERS = {"uv": "run", "poetry": "run", "pipenv": "run", "rye": "run", "conda": "run", "bundle": "exec",
+                "pdm": "run", "hatch": "run", "pixi": "run"}   # `uv run CMD ...`: CMD is the program
+
+
+def _runner_pkg(pos: list[tuple[str, str]]) -> list[str]:
+    """`npx jest`, `pnpm dlx x`, `uv tool run ruff`: fetch and run a package."""
+    return [] if pos and _plain(pos[0][1]) and pos[0][0] in _LOCAL_TOOLS else ["package runner"]
+
+
+def _pkg_reasons(prog: str, args: list[str], raws: list[str], ctx: "_Ctx") -> list[str]:
+    pos = _positionals(args, raws, _PKG_VALUES)
+    if prog in _RUNNER_ONLY:
+        return _runner_pkg(pos)
+    if not pos:
+        return []
+    sub, sraw = pos[0]
+    if not _plain(sraw):
+        return ["non-literal subcommand"]
+    if prog in _CMD_RUNNERS:
+        if sub == "tool" and len(pos) > 1 and pos[1][0] == "run":
+            return _runner_pkg(pos[2:])
+        if sub != _CMD_RUNNERS[prog]:
+            return []
+        # the command after `run`: classified like any program (`uv run pytest`, `uv run ./x.sh`)
+        k = args.index(sub) + 1
+        while k < len(args) and args[k].startswith("-") and args[k] != "--":
+            k += 2 if args[k] in _PKG_VALUES else 1
+        k += k < len(args) and args[k] == "--"
+        if k >= len(args):
+            return []
+        if prog in ("pdm", "hatch", "pixi") and _local_name(args[k], raws[k]):
+            return []  # a script defined in the project file
+        why = _prog_reasons(args, raws, k, ctx)
+        if not why and prog in ("pdm", "hatch", "pixi") and not (
+                args[k] in _LOCAL_TOOLS or _INTERP.fullmatch(args[k].rsplit("/", 1)[-1])):
+            return ["package script"]
+        return why
+    if prog == "pipx":
+        return _runner_pkg(pos[1:]) if sub == "run" else []
+    if prog == "go":
+        return [f"go {sub}"] if sub in ("run", "generate") else []
+    if prog == "cargo":
+        if sub in ("run", "r"):
+            return ["cargo run"]
+        if sub in _PKG_REMOTE:
+            return [f"cargo {sub}"]
+        return [] if sub in _PKG_LOCAL["cargo"] else ["cargo extension"]
+    if prog == "deno":
+        if sub == "task":
+            return [] if len(pos) > 1 and _local_name(*pos[1]) else ["package script"]
+        if sub in _PKG_REMOTE:
+            return [f"deno {sub}"]
+        return [] if sub in _PKG_LOCAL["deno"] else ["deno run"]
+    if prog == "dotnet":
+        if sub == "nuget" and len(pos) > 1 and pos[1][0] in ("push", "delete"):
+            return ["dotnet nuget push"]
+        return [] if sub in _PKG_LOCAL["dotnet"] else ["dotnet run"]
+    if prog == "gem":
+        return ["gem push"] if sub in ("push", "yank", "owner") else []
+    if prog == "bundle":
+        return []
+    # npm, pnpm, yarn, bun
+    if sub in ("run", "run-script", "rum", "urn"):
+        return [] if len(pos) < 2 or _local_name(*pos[1]) else ["package script"]
+    if sub in ("test", "t", "tst"):
+        return []
+    if sub in ("exec", "x", "dlx", "create", "node"):
+        return _runner_pkg(pos[1:])
+    if sub in _PKG_REMOTE or (prog == "yarn" and sub == "npm"):
+        return [f"{prog} {sub}"]
+    if sub in _PKG_LOCAL.get(prog, ()):
+        return []
+    if prog == "yarn" and sub == "workspace":  # `yarn workspace NAME SCRIPT`
+        return [] if len(pos) < 3 or _local_name(*pos[2]) or pos[2][0] in _PKG_LOCAL["yarn"] else ["package script"]
+    if prog in _PKG_SCRIPT_SHORTHAND:
+        return [] if _local_name(sub, sraw) else ["package script"]
+    return ["package command"]
+
+
+_PKG = {"npm", "pnpm", "yarn", "bun", "cargo", "go", "deno", "dotnet", "gem", "pipx"} | _RUNNER_ONLY | set(_CMD_RUNNERS)
+
+# ---- interpreters
+
+
+def _interp_reasons(args: list[str], raws: list[str], ctx: "_Ctx", name: str) -> list[str]:
+    if args and all(a in ("-V", "--version", "-version", "-v", "-h", "--help") for a in args):
+        return []
+    if name.startswith(("python", "pypy")):
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a in ("-W", "-X"):
+                i += 2
+            elif re.fullmatch(r"-[bBdEiIOPqsSuvx]+", a):
+                i += 1
+            elif a == "-m" and i + 1 < len(args):
+                mod = args[i + 1]
+                if not _plain(raws[i + 1]):
+                    return ["interpreter"]
+                if mod in _LOCAL_PY_MODULES:
+                    return []
+                # `python -m twine upload`: the module is the program
+                return _prog_reasons(args, raws, i + 1, ctx) or ["interpreter"]
+            else:
+                break
+    return ["interpreter"]
+
+
+# ---- git
+
+_GIT_COMMIT_SUBS = {"push", "send-pack", "http-push", "svn", "p4", "send-email", "imap-send", "cvsexportcommit"}
+_GIT_BUILTINS = set("""
+add am annotate apply archive backfill bisect blame branch bugreport bundle cat-file check-attr check-ignore check-mailmap
+check-ref-format checkout checkout-index cherry cherry-pick citool clean clone column commit commit-graph commit-tree config
+count-objects credential credential-cache credential-store daemon describe diagnose diff diff-files diff-index diff-tree
+difftool fast-export fast-import fetch fetch-pack filter-branch fmt-merge-msg for-each-ref for-each-repo format-patch fsck
+gc get-tar-commit-id grep gui hash-object help hook index-pack init init-db instaweb interpret-trailers log ls-files
+ls-remote ls-tree mailinfo mailsplit maintenance merge merge-base merge-file merge-index merge-one-file merge-tree
+mergetool mktag mktree multi-pack-index mv name-rev notes pack-objects pack-redundant pack-refs patch-id prune
+prune-packed pull range-diff read-tree rebase receive-pack reflog refs remote repack replace replay rerere reset restore
+rev-list rev-parse revert rm scalar shortlog show show-branch show-index show-ref sparse-checkout stage stash status
+stripspace submodule switch symbolic-ref tag unpack-file unpack-objects update-index update-ref update-server-info
+upload-archive upload-pack var verify-commit verify-pack verify-tag version whatchanged worktree write-tree""".split())
+_GIT_GLOBAL_FLAGS = _GIT_FLAGS | {"--no-advice", "--no-lazy-fetch", "--no-optional-locks"}
+_GIT_GLOBAL_ARGS = _GIT_ARG | {"--super-prefix", "--attr-source", "--list-cmds"}
+_GIT_INFO = {"--version", "--help", "-h", "-v", "--html-path", "--man-path", "--info-path", "--exec-path"}
+# config keys that run nothing and point git at nothing else (for `git -c` and the per-run taint)
+_GIT_SAFE_KEY = re.compile(
+    r"(user|author|committer|color|advice|column|i18n)\.[\w.-]+|init\.defaultbranch|"
+    r"core\.(quotepath|autocrlf|safecrlf|filemode|ignorecase|abbrev|precomposeunicode|longpaths|eol|whitespace)|"
+    r"(commit|tag)\.gpgsign|push\.(default|autosetupremote)|pull\.(rebase|ff)|merge\.(conflictstyle|ff)|"
+    r"rebase\.(autosquash|autostash|updaterefs)|fetch\.prune|diff\.(renames|algorithm|mnemonicprefix|noprefix|context|"
+    r"colormoved|relative)|log\.(date|decorate|abbrevcommit|follow)|format\.pretty|gc\.auto|maintenance\.auto|"
+    r"status\.(short|branch|showuntrackedfiles)|branch\.(autosetupmerge|sort)|protocol\.version|help\.autocorrect",
+    re.I)
+
+
+def _git_key_safe(kv: str) -> bool:
+    key, _, val = kv.partition("=")
+    if key.lower() in ("core.pager", "pager.log", "pager.diff", "pager.show", "pager.status", "pager.branch"):
+        return val in ("", "cat")
+    return bool(_GIT_SAFE_KEY.fullmatch(key))
+
+
+def _git_global(args: list[str], raws: list[str]) -> tuple[int | None, list[str]]:
+    """Walk git's global options: (index of the subcommand or None, reasons found on the way)."""
+    out, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a in _GIT_GLOBAL_FLAGS:
+            i += 1
+        elif a in _GIT_GLOBAL_ARGS:
+            i += 2
+        elif a.startswith("--") and "=" in a and a.split("=", 1)[0] in _GIT_GLOBAL_ARGS:
+            i += 1
+        elif a == "-c" or (a.startswith("-c") and not a.startswith("--")):
+            kv, raw = (a[2:], raws[i]) if len(a) > 2 else (args[i + 1], raws[i + 1]) if i + 1 < len(args) else ("", "")
+            if not (_plain(raw) and _git_key_safe(kv)):
+                out.append("git -c " + kv.split("=", 1)[0])
+            i += 1 if len(a) > 2 else 2
+        elif a.startswith(("--config-env", "--exec-path=")):
+            out.append("git " + a.split("=", 1)[0])
+            i += 2 if a == "--config-env" else 1
+        elif a in _GIT_INFO:
+            return None, out
+        elif a.startswith("-"):
+            out.append("git option " + a.split("=", 1)[0])
+            return None, out
+        else:
+            return i, out
+    return None, out
+
+
+def _git_reasons(args: list[str], raws: list[str], ctx: "_Ctx") -> list[str]:
+    i, out = _git_global(args, raws)
+    if i is None:
+        return out
+    sub = args[i]
+    if not _plain(raws[i]):
+        return out + ["non-literal git subcommand"]
+    rest, rraws = args[i + 1 :], raws[i + 1 :]
+    if sub in _GIT_COMMIT_SUBS:
+        out.append("git " + sub)
+    elif sub not in _GIT_BUILTINS:
+        out.append("git alias/extension")  # an alias can be `!sh -c ...`; an extension is any git-* program
+    elif sub == "bisect" and rest[:1] == ["run"]:
+        out += ["git bisect run"] + _prog_reasons(rest, rraws, 1, ctx)
+    elif sub == "submodule" and "foreach" in rest:
+        out.append("git submodule foreach")
+    elif sub == "rebase" and any(w in ("-x", "--exec") or w.startswith(("--exec=", "-x")) for w in rest):
+        out.append("git rebase --exec")
+    elif sub in ("filter-branch", "hook"):
+        out.append("git " + sub)
+    # configured patterns headed by git match from the subcommand on: `git -C repo push`
+    for pat in ctx.pats:
+        if pat[0] == "git" and len(pat) > 1 and pat[1] == sub:
+            it = iter(rest)
+            if all(p in it for p in pat[2:]):
+                out.append(" ".join(pat))
+    return out
+
+
+# ---- gh, curl/wget, cloud CLIs
+
+_GH_READ = {"view", "list", "ls", "diff", "checks", "status", "download", "watch", "checkout", "clone", "get", "field-list",
+            "item-list", "check", "verify", "token"}
+_GH_TOP_READ = {"search", "status", "version", "help", "completion", "browse"}
+
+
+def _gh_reasons(args: list[str], raws: list[str]) -> list[str]:
+    pos = _positionals(args, raws)
+    if not pos:
+        return []
+    top, traw = pos[0]
+    if not _plain(traw):
+        return ["non-literal gh command"]
+    if top == "api":  # GET unless a method or fields say otherwise (fields turn it into a POST)
+        method, fields = None, False
+        for k, a in enumerate(args):
+            if a in ("-X", "--method") and k + 1 < len(args):
+                method = args[k + 1] if _plain(raws[k + 1]) else "?"
+            elif a.startswith("--method="):
+                method = a.split("=", 1)[1]
+            elif a.startswith("-X") and len(a) > 2:
+                method = a[2:]
+            elif a in ("-f", "-F", "--field", "--raw-field", "--input") or a.startswith(
+                    ("--field=", "--raw-field=", "--input=", "-f", "-F")):
+                fields = True
+        m = (method or ("POST" if fields else "GET")).upper()
+        return [] if m in ("GET", "HEAD") else ["gh api " + m]
+    if top in _GH_TOP_READ:
+        return []
+    if len(pos) >= 2 and _plain(pos[1][1]) and pos[1][0] in _GH_READ:
+        return []
+    return ["gh write"]
+
+
+_LOOPBACK = re.compile(r"(https?://)?(localhost|127(\.\d{1,3}){3}|\[::1\]|0\.0\.0\.0)(:\d{1,5})?([/?#][^\s@]*)?", re.I)
+_CURL_LONG = {"silent", "show-error", "fail", "fail-with-body", "head", "location", "verbose", "insecure", "include",
+              "globoff", "no-buffer", "compressed", "no-progress-meter", "http1.1", "http2", "ipv4", "ipv6", "get"}
+_CURL_LONG_ARG = {"output", "header", "max-time", "connect-timeout", "retry", "retry-delay", "retry-max-time",
+                  "write-out", "user-agent", "referer", "range", "request", "max-filesize"}
+_WGET_LONG = {"quiet", "spider", "server-response", "no-check-certificate", "no-verbose", "verbose"}
+_WGET_LONG_ARG = {"output-document", "tries", "timeout", "user-agent", "header", "max-redirect", "method"}
+
+
+def _http_reasons(prog: str, args: list[str], raws: list[str]) -> list[str]:
+    """curl/wget: a GET (or HEAD) of loopback URLs only, with options that send nothing, is local."""
+    if prog == "curl":
+        p = _parse(args, "sSfILvkiqgN46G", "oHmwAerXY", _CURL_LONG, _CURL_LONG_ARG)
+    else:
+        p = _parse(args, "qSvNc", "OotTU", _WGET_LONG, _WGET_LONG_ARG)
+    if p is None or not all(_plain(r) for r in raws):
+        return [prog]
+    opts, urls = p
+    if any(k in ("X", "request", "method") and (v or "").upper() not in ("GET", "HEAD") for k, v in opts):
+        return [prog]
+    return [] if urls and all(_LOOPBACK.fullmatch(u) for u in urls) else [prog]
+
+
+_REMOTE_CLI = {"aws", "gcloud", "gsutil", "az", "doctl", "heroku", "fly", "flyctl", "vercel", "netlify", "firebase",
+               "wrangler", "eksctl", "pulumi", "sam", "cdk", "serverless", "sls", "ansible", "ansible-playbook", "oc",
+               "kubectl", "helm", "terraform", "tofu", "rclone", "s3cmd"}
+_ALWAYS_REMOTE = {"http", "https", "xh", "httpie", "mail", "mailx", "sendmail", "mutt", "msmtp", "swaks", "nc", "ncat",
+                  "socat", "telnet", "lftp"}
+_REMOTE_READ = {"get", "describe", "list", "ls", "show", "logs", "log", "status", "info", "whoami", "version", "help",
+                "explain", "top", "view", "plan", "validate", "fmt", "output", "graph", "providers", "preview", "diff",
+                "template", "lint", "search", "history", "cluster-info", "api-resources", "api-versions", "config",
+                "init", "inspect", "cat", "tree", "size", "check", "console", "can-i", "current-context", "get-contexts"}
+_REMOTE_WRITE = {"delete", "create", "update", "deploy", "apply", "set", "add", "remove", "rm", "destroy", "put", "patch",
+                 "scale", "restart", "start", "stop", "run", "exec", "rollout", "push", "upload", "sync", "cp", "mv",
+                 "import", "invoke", "publish", "release", "promote", "attach", "detach", "enable", "disable", "reset",
+                 "reboot", "ssh", "scp", "login", "new", "select", "install", "upgrade", "uninstall", "rollback", "edit",
+                 "label", "annotate", "drain", "cordon", "uncordon", "taint", "untaint", "replace", "expose", "autoscale",
+                 "refresh", "up", "down", "kill", "send", "copy", "move", "purge", "rotate", "revoke", "grant"}
+
+
+def _remote_reasons(prog: str, args: list[str], raws: list[str]) -> list[str]:
+    pos = _positionals(args, raws)
+    words = {w.lower() for w, r in pos if _plain(r)}
+    if len(words) < len(pos) or words & _REMOTE_WRITE:
+        return [f"remote CLI {prog}"]
+    reads = any(w in _REMOTE_READ or w.startswith(("describe-", "list-", "get-")) for w in words)
+    return [] if reads else [f"remote CLI {prog}"]
+
+
+# ---- runners of a command: `xargs git push`, `watch git status`, `strace -f ./x`
+# name -> (short options taking a value, long options taking a value, operands before the command)
+_RUNNERS: dict[str, tuple[str, set, int]] = {
+    "xargs": ("adEILnPs", {"arg-file", "delimiter", "eof", "replace", "max-lines", "max-args", "max-procs",
+                           "max-chars", "process-slot-var"}, 0),
+    "parallel": ("jJNnSaIdE", {"jobs", "sshlogin", "arg-file", "colsep", "results", "joblog", "delimiter", "tmpdir",
+                               "workdir", "basefile"}, 0),
+    "watch": ("n", {"interval"}, 0),
+    "strace": ("abeEIoOpPsSuUX", set(), 0), "ltrace": ("aAeEFlnopsSuwxX", set(), 0), "setsid": ("", set(), 0),
+    "unbuffer": ("", set(), 0), "ionice": ("cnpPu", set(), 0), "chrt": ("", set(), 1), "taskset": ("", set(), 1),
+    "doas": ("uC", set(), 0), "flock": ("wE", set(), 1), "chroot": ("", {"userspec", "groups"}, 1),
+    "xvfb-run": ("nsfep", set(), 0), "valgrind": ("", set(), 0), "catchsegv": ("", set(), 0),
+    "proxychains": ("f", set(), 0), "proxychains4": ("f", set(), 0), "torsocks": ("uaPp", set(), 0),
+    "dbus-run-session": ("", {"config-file", "dbus-daemon"}, 0), "firejail": ("", set(), 0),
+    "systemd-run": ("pEu", {"unit", "property", "setenv", "uid", "gid", "description", "slice", "working-directory"}, 0),
+    "caffeinate": ("tw", set(), 0),
+}
+
+
+def _runner_target(name: str, words: list[str], i: int) -> int:
+    """Index of the command a runner at words[i] runs (len(words) if none)."""
+    short_arg, long_arg, operands = _RUNNERS[name]
+    i += 1
+    while i < len(words):
+        w = words[i]
+        if w == "--":
+            i += 1
+            break
+        if w.startswith("--"):
+            i += 2 if w[2:] in long_arg else 1
+        elif w.startswith("-") and len(w) > 1:
+            j = next((k for k, c in enumerate(w[1:], 1) if c in short_arg), None)
+            i += 2 if j is not None and j == len(w) - 1 else 1
+        else:
+            break
+    return i + operands
+
+
+@dataclasses.dataclass
+class _Ctx:
+    pats: list[list[str]]
+    heads: set[str]
+    depth: int = 0
+
+
+def _prog_reasons(words: list[str], raws: list[str], p: int, ctx: _Ctx) -> list[str]:
+    """Why the command whose program is words[p] is a commit point ([] if it isn't)."""
+    if p >= len(words) or ctx.depth > 6:
+        return ["nested too deep"] if ctx.depth > 6 else []
+    w, raw = words[p], raws[p]
+    if raw in ("[", "[[", "((") or w == "[":
+        return []  # test expressions; substitutions inside them are nested scripts
+    if not _plain(raw):
+        return ["non-literal program"]
+    name = w.rsplit("/", 1)[-1]
+    if "/" in w and not _trusted_path(w) and name not in ("gradlew", "mvnw") and not _TOOL_BIN.fullmatch(w.rsplit("/", 1)[0]):
+        return ["script"]
+    if "/" not in w and name.endswith(_SCRIPT_EXT):
+        return ["script"]
+    args, rraws = words[p + 1 :], raws[p + 1 :]
+    ctx = _Ctx(ctx.pats, ctx.heads, ctx.depth + 1)
+    out = [" ".join(pat) for pat in ctx.pats
+           if pat[0] == name and name not in ("git", "gh", "curl", "wget") and _at(words, p, pat, True)]
+    if name in _SHELLS:
+        out.append("shell")
+    elif name in ("source", "."):
+        out.append("sources a script")
+    elif _INTERP.fullmatch(name):
+        out += _interp_reasons(args, rraws, ctx, name)
+    elif name in _TASK_RUNNERS:
+        out += _task_reasons(name, args, rraws)
+    elif name in _PKG:
+        out += _pkg_reasons(name, args, rraws, ctx)
+    elif name == "git":
+        out += _git_reasons(args, rraws, ctx)
+    elif name == "gh":
+        out += _gh_reasons(args, rraws)
+    elif name in ("curl", "wget"):
+        out += _http_reasons(name, args, rraws) if name in ctx.heads else []
+    elif name in _REMOTE_CLI:
+        out += _remote_reasons(name, args, rraws)
+    elif name in _ALWAYS_REMOTE:
+        out.append(f"network client {name}")
+    elif name in _RUNNERS:
+        if name == "parallel" and any(a in ("-S", "--sshlogin") or a.startswith(("--sshlogin=", "-S")) for a in args):
+            out.append("parallel --sshlogin")
+        if name == "flock" and any(a in ("-c", "--command") for a in args):
+            out.append("shell")
+        out += _prog_reasons(words, raws, _runner_target(name, words, p), ctx)
+    elif name == "find":
+        for k in range(p + 1, len(words)):
+            if words[k] in ("-exec", "-execdir", "-ok", "-okdir"):
+                out += _prog_reasons(words, raws, k + 1, ctx)
+    return out
 
 
 def _at(words: list[str], i: int, pat: list[str], loose: bool) -> bool:
     """`pat` starts at words[i]: exactly (`git push ...`), or loosely with its other words anywhere
-    after it in order (`git -C repo push`, `xargs -n1 git push`)."""
+    after it in order (`docker compose push`, `npm --registry x publish`)."""
     if i >= len(words) or words[i].rsplit("/", 1)[-1] != pat[0]:
         return False
     if not loose:
@@ -587,34 +1099,124 @@ def _scripts(words: list[str], raws: list[str]) -> list[tuple[str, bool]]:
             out += [(w.split("=", 1)[1] if w.startswith("--") else w[2:], True) for w in words[i + 1 :]
                     if w.startswith("--split-string=") or (w.startswith("-S") and len(w) > 2)]
     # any other word that looks like a command line: looked at only when something in the line runs
-    # text as a script (see _commits), and then by its head only
+    # text as a script (see _reasons)
     out += [(w, False) for w in words if _SCRIPTY.search(w)]
     return out
 
 
-def _commits(cmd: str, pats: list[list[str]], cfg: Config, depth: int, certain: bool = True) -> bool:
-    if depth > 4:
-        return True
-    extra = set(cfg.extra_readonly_commands)
-    cmds = [(words, raws, ok and _program_readonly(words, raws, extra)) for words, raws, ok in _commands(cmd)]
+def _reasons(cmd: str, ctx: _Ctx, out: list[str]) -> None:
+    if ctx.depth > 6:
+        out.append("nested too deep")
+        return
+    # read-only by the built-in allowlist (operators' extra_readonly_commands don't make a program
+    # safe to run unattended as a commit)
+    cmds = [(words, raws, ok and _program_readonly(words, raws, set())) for words, raws, ok in _commands(cmd)]
     # `echo 'git push' | sh`, `watch 'git push'`, `bash <<EOF`: quoted text may run as a script;
     # otherwise it is data (`git commit -m "then git push"`, `grep "git push" f`)
-    runs_text = any(w.rsplit("/", 1)[-1] in _RUNS_TEXT for words, _, readonly in cmds if not readonly for w in words)
-    for words, raws, readonly in cmds:
-        if any(_at(words, unwrap(words)[0], p, False) for p in pats):
-            return True
-        if not certain:
-            continue
-        # a command we can't show read-only may run a commit command anywhere in it
-        if not readonly and any(_at(words, i, p, True) for p in pats for i in range(len(words))):
-            return True
-        if any(_commits(s, pats, cfg, depth + 1, sure) for s, sure in _scripts(words, raws) if sure or runs_text):
-            return True
-    return False
+    runs_text = any(w.rsplit("/", 1)[-1] in _RUNS_TEXT for words, _, ro in cmds if not ro for w in words)
+    multi = [p for p in ctx.pats if len(p) > 1 and p[0] not in ("gh", "curl", "wget")]
+    for words, raws, ro in cmds:
+        if not ro:
+            p = program_index(words, raws)[0]
+            out += _prog_reasons(words, raws, p, ctx)
+            # a wrapper we don't model may still run a known commit command: `mywrap git push`
+            names = [w.rsplit("/", 1)[-1] for w in words]
+            out += [" ".join(pat) for pat in multi for i in range(p + 1, len(words)) if names[i : i + len(pat)] == pat]
+        for s, sure in _scripts(words, raws):
+            if sure or runs_text:
+                _reasons(s, _Ctx(ctx.pats, ctx.heads, ctx.depth + 1), out)
+
+
+def commit_reason(tool: str, args: dict, cfg: Config) -> str:
+    """Why a call is a commit point ('' if it isn't): the matching commit tool pattern, or the
+    reasons found in its shell command (`git push`, `interpreter`, `task runner`, `gh write`, ...)."""
+    out = [f"tool {p}" for p in cfg.commit_tools if fnmatch.fnmatchcase(tool, p)][:1]
+    pats = [p.split() for p in cfg.commit_commands if p.split()]
+    ctx = _Ctx(pats, {p[0] for p in pats})
+    for k, v in args.items():
+        if k in SHELL_KEYS and isinstance(v, str):
+            _reasons(v, ctx, out)
+    return "; ".join(dict.fromkeys(out))
 
 
 def is_commit_point(tool: str, args: dict, cfg: Config) -> bool:
-    if _match(tool, cfg.commit_tools):
-        return True
-    pats = [p.split() for p in cfg.commit_commands if p.split()]
-    return any(k in SHELL_KEYS and isinstance(v, str) and _commits(v, pats, cfg, 0) for k, v in args.items())
+    return bool(commit_reason(tool, args, cfg))
+
+
+# ------------------------------------------------------------------ repository taint
+#
+# git reads run programs the repository names (core.fsmonitor, diff.external, textconv and clean
+# filters, an embedded bare repo's config). With trust_repo_config the checkout is trusted, but a
+# call in the run that changes what git will read ends that trust for the rest of the run.
+
+_GIT_META = re.compile(r"(^|[\s/'\"=:<>|;&(])\.git($|[/\s'\"):;&|])|\.git(attributes|modules)\b|(^|[\s/'\"=])\.gitconfig\b")
+_ARCHIVE = {"unzip", "7z", "7za", "7zr", "unrar", "unar", "cpio", "pax", "ar", "jar", "bsdtar", "aunpack", "atool",
+            "dpkg-deb"}
+
+
+def _git_config_taints(rest: list[str], raws: list[str]) -> str:
+    if _git(["config", *rest]):
+        return ""  # a read
+    pos = [w for w, r in _positionals(rest, raws, {"-f", "--file", "--blob", "--type", "--default", "--value", "--url"})]
+    if pos and pos[0] in ("set", "unset", "replace-all", "add"):
+        pos = pos[1:]
+    key = pos[0] if pos else ""
+    kv = key + "=" + (pos[1] if len(pos) > 1 else "")
+    return "" if key and _git_key_safe(kv) and not {"-e", "--edit", "-f", "--file"} & set(rest) else f"git config {key}"
+
+
+@functools.lru_cache(maxsize=4096)
+def _shell_taint(cmd: str, depth: int = 0) -> str:
+    if depth > 4:
+        return "nested too deep"
+    if _GIT_META.search(cmd):
+        return "git metadata path"
+    for words, raws, _ in _commands(cmd):
+        p = program_index(words, raws)[0]
+        if p == len(words) or words[p] in ("export", "declare", "typeset", "readonly", "local"):
+            if any(w.startswith("GIT_") and "=" in w for w in words):
+                return "git environment"
+        if p < len(words):
+            name, args = words[p].rsplit("/", 1)[-1], words[p + 1 :]
+            if name == "git":
+                i, _ = _git_global(args, raws[p + 1 :])
+                sub = args[i] if i is not None else ""
+                if sub == "config":
+                    why = _git_config_taints(args[i + 1 :], raws[p + i + 2 :])
+                    if why:
+                        return why
+                elif sub == "clone" or sub == "submodule" or (sub in ("init", "init-db") and any(
+                        a.startswith(("--bare", "--separate-git-dir")) for a in args)):
+                    return "git " + sub
+            elif name == "tar" and args and (
+                    ("x" in args[0] and not args[0].startswith("--")) or "--extract" in args or "--get" in args
+                    or any(a.startswith("-") and not a.startswith("--") and "x" in a for a in args)):
+                return "archive extraction"
+            elif name in _ARCHIVE:
+                return "archive extraction"
+            elif _INTERP.fullmatch(name) and any(a in ("zipfile", "tarfile", "shutil") for a in args):
+                return "archive extraction"
+        for s, _ in _scripts(words, raws):
+            why = _shell_taint(s, depth + 1)
+            if why:
+                return why
+    return ""
+
+
+def repo_taint(tool: str, args: dict, cfg: Config) -> str:
+    """Why this call ends trust in the repository's git config for the rest of its run ('' if it
+    doesn't): it writes `.git/*`, `.gitattributes` or `.gitmodules`, sets a git config key that can run
+    a program, sets GIT_* variables, runs `init --bare`/`clone`/`submodule`, or extracts an archive."""
+    for k, v in args.items():
+        if not isinstance(v, str):
+            continue
+        why = _shell_taint(v) if k in SHELL_KEYS else (
+            "git metadata path" if "\n" not in v and _GIT_META.search(v) else "")  # a path, not file content
+        if why:  # reading `.gitattributes` changes nothing
+            return "" if is_readonly(tool, args, cfg) else why
+    return ""
+
+
+def untrusted(cfg: Config) -> Config:
+    """`cfg` with the repository's git config distrusted (for a tainted run)."""
+    return cfg if not cfg.trust_repo_config else dataclasses.replace(cfg, trust_repo_config=False)

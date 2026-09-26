@@ -84,16 +84,23 @@ def cmd_approve(a: argparse.Namespace) -> None:
         return
     if not a.edge:
         raise SystemExit("treejit: approve needs an edge id (or '*', or --review)")
+    not_commit = getattr(a, "not_commit", False)
+    if a.edge == "*" and not_commit:
+        raise SystemExit("treejit: --not-commit is per edge: name the edge (approve '*' never implies it)")
     if a.edge != "*":
         a.edge = _resolve(jit, "edge", a.edge)
     if a.node:
         a.node = _resolve(jit, "node", a.node)
     if a.revoke:
-        jit.store.x("DELETE FROM approvals WHERE edge=? AND node=?", (a.edge, a.node or ""))
+        if not not_commit:
+            jit.store.x("DELETE FROM approvals WHERE edge=? AND node=?", (a.edge, a.node or ""))
+        if not_commit or not a.node:
+            jit.store.x("DELETE FROM not_commit WHERE edge=?", (a.edge,))
     else:
-        jit.store.x("INSERT OR REPLACE INTO approvals(edge, node, ts) VALUES(?,?,?)", (a.edge, a.node or "", now()))
+        operate.approve(jit.store, a.edge, a.node or "", not_commit=not_commit)
     _mark_dirty(jit)
-    print("revoked" if a.revoke else "approved", a.edge, "at", a.node or "every node")
+    what = " (not a commit point)" if not_commit else ""
+    print("revoked" if a.revoke else "approved", a.edge + what, "at", a.node or "every node")
 
 
 def cmd_revoke(a: argparse.Namespace) -> None:
@@ -227,11 +234,15 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--revoke", action="store_true")
     s.add_argument("--review", action="store_true", help="walk pending edges interactively (y/e/n/s/q on stdin)")
     s.add_argument("--family", help="with --review: only this family")
+    s.add_argument("--not-commit", action="store_true",
+                   help="also declare this edge not a commit point (its effects are local: a test script, a local "
+                        "make target); per edge only, never implied by approve '*'")
     s.set_defaults(fn=cmd_approve)
 
     s = sub.add_parser("revoke", help="undo an approval (same as approve --revoke)")
     s.add_argument("edge")
     s.add_argument("--node")
+    s.add_argument("--not-commit", action="store_true", help="only withdraw the not-a-commit-point declaration")
     s.set_defaults(fn=cmd_revoke)
 
     s = sub.add_parser("pending", help="list promoted edges waiting on operator approval")

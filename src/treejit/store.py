@@ -48,11 +48,13 @@ CREATE TABLE IF NOT EXISTS node_edges(
   node TEXT, edge TEXT, family TEXT, n INTEGER, pass_runs INTEGER, fail_runs INTEGER, pass_n INTEGER,
   blamed REAL, tomb INTEGER, live INTEGER, replayable INTEGER, tier TEXT, purity REAL, success REAL, conf REAL,
   bindings TEXT, holes TEXT, guard TEXT, post TEXT, ref TEXT, reasons TEXT, commit_point INTEGER,
-  savings REAL, latency_ms REAL, score REAL, fillable INTEGER DEFAULT 0, blocked TEXT, PRIMARY KEY(node, edge));
+  savings REAL, latency_ms REAL, score REAL, fillable INTEGER DEFAULT 0, blocked TEXT, commit_reason TEXT DEFAULT '',
+  approved INTEGER DEFAULT 0, PRIMARY KEY(node, edge));
 CREATE INDEX IF NOT EXISTS node_edges_family ON node_edges(family);
 
 CREATE TABLE IF NOT EXISTS pins(node TEXT, edge TEXT, ts REAL, PRIMARY KEY(node, edge));
 CREATE TABLE IF NOT EXISTS approvals(edge TEXT, node TEXT, ts REAL, PRIMARY KEY(edge, node));
+CREATE TABLE IF NOT EXISTS not_commit(edge TEXT PRIMARY KEY, ts REAL);
 CREATE TABLE IF NOT EXISTS evictions(node TEXT PRIMARY KEY, ts REAL);
 CREATE TABLE IF NOT EXISTS hits(node TEXT PRIMARY KEY, hits INTEGER, last_hit REAL);
 CREATE TABLE IF NOT EXISTS compactions(call_id TEXT PRIMARY KEY, obs_hash TEXT, digest TEXT, saved INTEGER, ts REAL);
@@ -78,7 +80,8 @@ class Store:
         # family for a rebuild to fill them in.
         cols = {r["name"] for r in self.db.execute("PRAGMA table_info(node_edges)")}
         added = False
-        for col, ddl in (("fillable", "fillable INTEGER DEFAULT 0"), ("blocked", "blocked TEXT")):
+        for col, ddl in (("fillable", "fillable INTEGER DEFAULT 0"), ("blocked", "blocked TEXT"),
+                         ("commit_reason", "commit_reason TEXT DEFAULT ''"), ("approved", "approved INTEGER DEFAULT 0")):
             if col not in cols:
                 self.db.execute(f"ALTER TABLE node_edges ADD COLUMN {ddl}")
                 added = True
@@ -202,6 +205,10 @@ class Store:
 
     def approvals(self) -> set[tuple[str, str]]:
         return {(r["edge"], r["node"]) for r in self.q("SELECT edge, node FROM approvals")}
+
+    def not_commit(self) -> set[str]:
+        """Edges an operator declared not a commit point (`treejit approve EDGE --not-commit`)."""
+        return {r["edge"] for r in self.q("SELECT edge FROM not_commit")}
 
     def evictions(self) -> dict[str, float]:
         return {r["node"]: r["ts"] for r in self.q("SELECT node, ts FROM evictions")}

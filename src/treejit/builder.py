@@ -22,7 +22,7 @@ from .bindings import Sources, find_rule
 from .config import Config
 from .features import excess_negatives, guard_holds, guard_of, learn_decision_list, obs_features, postcondition, task_words
 from .model import Observation, Step, ToolCall
-from .policy import is_commit_point, is_readonly
+from .policy import commit_reason, is_readonly
 from .store import Store, dumps
 from .templates import anti_unify, call_slots, edge_id, label, shape_of, var_slots
 from .tree import END, contexts, node_id
@@ -31,7 +31,7 @@ from .util import decay, now
 MAX_INSTANCES = 40  # most recent passing instances used for bindings/guards
 NE_COLS = ("node", "edge", "family", "n", "pass_runs", "fail_runs", "pass_n", "blamed", "tomb", "live", "replayable",
            "tier", "purity", "success", "conf", "bindings", "holes", "guard", "post", "ref", "reasons", "commit_point",
-           "savings", "latency_ms", "score", "fillable", "blocked")
+           "savings", "latency_ms", "score", "fillable", "blocked", "commit_reason", "approved")
 
 
 @dataclass
@@ -107,6 +107,7 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
     runs = load_runs(store, family, cfg.max_runs)
     pins = store.pins()
     approvals = store.approvals()
+    not_commit = store.not_commit()
     evicted = store.evictions()
     usage = _usage_by_call(store, family)
 
@@ -283,7 +284,9 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
             post = postcondition(with_obs) if len(with_obs) == len(passing) else {}
         ref_rd, ref_i = (passing or lst or [(rd, i + 1) for rd, i in corr[(nid, eid)]])[-1]
         ref = ref_rd.steps[ref_i].call.args
-        commit = is_commit_point(tpl["tool"], ref, cfg)
+        why_commit = commit_reason(tpl["tool"], ref, cfg)
+        # `treejit approve EDGE --not-commit` is per edge; `approve '*'` never implies it
+        commit = bool(why_commit) and eid not in not_commit
         approved = (eid, nid) in approvals or (eid, "") in approvals or ("*", "") in approvals
         safe = is_readonly(tpl["tool"], ref, cfg) or approved
         fillable = live and not tomb and safe and (not commit or (approved and pass_runs >= cfg.promote_runs + 1))
@@ -304,7 +307,7 @@ def build_family(store: Store, cfg: Config, family: str) -> dict[str, Any]:
             nid, eid, family, len(lst), pass_runs, fail_runs, pass_n, round(f, 4), int(tomb), int(live), int(replayable),
             tier, round(purity, 4), round(success, 4), round(purity * success, 4), dumps(bindings), dumps(holes),
             dumps(guard), dumps(post), dumps(ref), dumps(reasons[:3]), int(commit), round(savings, 1), round(latency, 1),
-            round(pass_runs * max(savings, 1.0) * templatability, 2), int(fillable), blocked,
+            round(pass_runs * max(savings, 1.0) * templatability, 2), int(fillable), blocked, why_commit, int(approved),
         ))
 
     # 5. decision lists
